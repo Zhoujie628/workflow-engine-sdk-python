@@ -20,7 +20,7 @@ Verify:
 
 ```python
 import workflow_engine
-print(workflow_engine.__version__)  # 1.0.1
+print(workflow_engine.__version__)  # 0.0.3
 ```
 
 ---
@@ -512,7 +512,5 @@ transport = A2ATransport(
 4. [ ] Load a PSOP workflow (`load_psop`) or build a `Workflow` from dict
 5. [ ] Configure agent auth (optional: `credentials_config` or `auth_provider`)
 6. [ ] Pre-position Authorization-T / Notification-T via `ExtensionSender` (optional)
-7. [ ] Run with `execute_psop` (Layer 2) or `WorkflowExecutor` (Layer 1)
-8. [ ] Drain the event stream; persist results in `on_finish`
 7. [ ] Run with `execute_psop` (Layer 2) or `WorkflowExecutor` (Layer 1)
 8. [ ] Drain the event stream; persist results in `on_finish`
