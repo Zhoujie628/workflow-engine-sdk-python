@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "workflow-exec-engine"
+version = "0.0.3"
+description = "Standalone workflow execution SDK for A2A-T multi-agent orchestration"
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+requires-python = ">=3.12"
+authors = [
+    { name = "A2A SDK Team", email = "ivo.zhou@huawei.com" },
+]
+keywords = ["a2a", "agent", "orchestration", "workflow", "sdk"]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries",
+]
+dependencies = [
+    "a2a-sdk>=1.0.0",
+    "a2a-t-sdk>=1.0.0",
+    "httpx>=0.27.0",
+    "loguru>=0.7.0",
+    "protobuf>=4.25.0",
+    "packaging>=23.0",
+    "cryptography>=42.0.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/Zhoujie628/workflow-exec-engine"
+Documentation = "https://github.com/Zhoujie628/workflow-exec-engine#readme"
+Repository = "https://github.com/Zhoujie628/workflow-exec-engine"
+
+[tool.setuptools.packages.find]
+include = ["workflow_engine*"]
