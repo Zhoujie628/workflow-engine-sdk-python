@@ -207,7 +207,11 @@ class DefaultControlPoint(ControlPoint):
         if self._negotiation_strategy is not None:
             return await self._negotiation_strategy.resolve(
                 agent_name, negotiation_text, receive_result)
-        logger.info(f"[DefaultCP] onNegotiation: agent={agent_name}, concern={negotiation_text}")
+        logger.info(
+            f"[DefaultCP] onNegotiation: agent={agent_name}, "
+            f"concern_chars={len(negotiation_text or '')}"
+        )
+        logger.trace(f"[DefaultCP] Negotiation concern: {negotiation_text}")
         return "Please proceed with the original task using available information."
 
 
