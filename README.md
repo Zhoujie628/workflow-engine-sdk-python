@@ -1,5 +1,8 @@
 ﻿# workflow-engine
 
+[![CI](https://github.com/project-openan/workflow-engine-sdk-python/actions/workflows/ci.yml/badge.svg)](https://github.com/project-openan/workflow-engine-sdk-python/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
+
 独立工作流执行 SDK，支持宿主 Agent 执行编排中心工作流（PSOP），同时保留对 A2A 通信、A2A-T 扩展与路由决策的完全控制权。SDK 自包含，不依赖编排中心任何代码。
 
 > 完整设计参见 [DESIGN.md](DESIGN.md)。本文档面向集成者，快速上手与接口说明。
@@ -21,14 +24,15 @@
 ```
 A2ATransport（共享通信层：httpx + 认证 + AgentCard 映射 + SSE 消费）
   ├── WorkflowEngineClient（工作流发送门面：Task-T 生成、Negotiation-T 自动循环、事件回调、ControlPoint 装配）
-  └── ExtensionSender（一次性预置门面：Authorization-T / Notification-T 发送）
+  └── ExtensionSender（前置扩展门面：Authorization-T 一次请求 / Notification-T 长驻订阅）
 ```
 
 决策层接口：
 
 - **ControlPoint** — 流程决策（`on_task` / `on_self_task` / `on_route` / `on_negotiation`）
 
-Authorization-T 和 Notification-T 是预置操作，在工作流启动前通过 `ExtensionSender` 单向下发，不在工作流执行中回调。
+Authorization-T 和 Notification-T 都是工作流外的前置操作：Authorization-T 成功返回后结束；Notification-T
+在订阅确认后保持 SSE 长连接，其生命周期归工作台服务所有，不应随单次任务或工作流结束而关闭。
 
 ```mermaid
 flowchart TB
@@ -39,7 +43,7 @@ flowchart TB
     subgraph SDK["SDK（自包含）"]
         TR["A2ATransport<br/>共享通信层"]
         WEC["WorkflowEngineClient<br/>工作流发送"]
-        ES["ExtensionSender<br/>一次性预置"]
+        ES["ExtensionSender<br/>授权请求 / 通知订阅"]
         WE["WorkflowExecutor<br/>DAG 遍历"]
     end
     subgraph Agents["远端 Agents"]
@@ -82,14 +86,14 @@ class MyControlPoint(ControlPoint):
 
 async def main():
     # 1. 获取 AgentCards（注册中心或自定义来源）
-    registry = RegistryClient(url="https://127.0.0.1:5000", ssl_verify=False)
+    registry = RegistryClient(url="https://registry.example.com", ssl_verify=True)
     agent_cards = await registry.fetch_agent_cards()
 
     # 2. 加载 PSOP 工作流
     workflow = await load_psop(
-        base_url="https://127.0.0.1:5001",
+        base_url="https://orchestrator.example.com",
         psop_id="your-psop-id",
-        ssl_verify=False,
+        ssl_verify=True,
     )
 
     # 3. 执行：execute_psop 内部构建 A2ATransport + WorkflowEngineClient
@@ -100,7 +104,7 @@ async def main():
         a2at_env_path=".env",
         credentials_config="agent_credentials.json",
         runtime_intent="诊断 SPN 跨市故障",
-        ssl_verify=False,
+        ssl_verify=True,
     ):
         print(f"[{event['type']}] {event['data']}")
 
@@ -117,7 +121,7 @@ if __name__ == "__main__":
 | 1（中） | `WorkflowExecutor` | DAG 遍历、上下文组装、调度 | ControlPoint + WorkflowEngineClient + Workflow |
 | 0（低） | `A2ATransport` + 两个门面 | A2A 发送、认证、扩展、SSE | AgentCards + 配置 |
 
-大多数集成使用第 2 层。需要手动控制时使用第 1 层。仅做一次性预置发送时直接使用 `ExtensionSender`。
+大多数集成使用第 2 层。需要手动控制时使用第 1 层。执行授权或建立通知订阅时直接使用 `ExtensionSender`。
 
 ## 用户实现的接口
 
@@ -145,7 +149,7 @@ transport = A2ATransport(
 # 工作流发送门面
 engine_client = WorkflowEngineClient(transport)
 
-# 一次性预置门面（工作流开始前）
+# 前置扩展门面（工作流开始前）
 sender = ExtensionSender(transport)
 auth_result = await sender.send_authorization("agent_a", "授权诊断操作", "诊断 SPN 跨市故障")
 notif_result = await sender.send_notification("agent_a", "订阅恢复结果通知", "诊断 SPN 跨市故障")
@@ -153,7 +157,7 @@ notif_result = await sender.send_notification("agent_a", "订阅恢复结果通�
 
 两个门面共享同一个 transport，不重复 wire 代码。
 
-**前置操作的回调**：Authorization-T 和 Notification-T 是工作流开始前的一次性操作，通过 `ExtensionSender` 发送。发送结果直接通过返回的 `SendMessageResult` 获取，无需额外的回调接口。
+**前置操作的回调**：Authorization-T 的 Future 表示一次请求完成；Notification-T 的 Future 只表示订阅建立，后续事件通过通知回调持续接收。关闭工作台级 transport 才会终止该订阅。
 
 ## A2A-T 扩展
 
@@ -162,9 +166,16 @@ notif_result = await sender.send_notification("agent_a", "订阅恢复结果通�
 | Task-T | 工作流链路 | 发送时由 SDK 生成结构化任务提示并注入 `metadata["...Task-T/v1"]` |
 | Negotiation-T | 工作流链路 | 接收时从 `metadata["...NEGOTIATION-T"]` 提取协商上下文，驱动自动循环 |
 | Authorization-T | 一次性预置 | 工作流开始前通过 `ExtensionSender` 发送，`instruction` → `parts[].text`，`natural_language_input` → SDK 生成结构化策略 → `metadata["...Authorization-T/v1"]` |
-| Notification-T | 一次性预置 | 工作流开始前通过 `ExtensionSender` 发送，`instruction` → `parts[].text`，`natural_language_input` → SDK 生成结构化订阅 → `metadata["...Notification-T/v1"]` |
+| Notification-T | 长驻订阅 | 工作流开始前通过 `ExtensionSender` 建立 SSE 订阅，`instruction` → `parts[].text`，`natural_language_input` → SDK 生成结构化订阅 → `metadata["...Notification-T/v1"]`；生命周期独立于单次工作流 |
 
 `ExtensionRegistry` 自动注册 Task-T 与 Negotiation-T（工作流内处理器）；Authorization-T / Notification-T 是预置操作，不自动注册，其 handler 类保留供手动注册处理 Agent 内联推送的数据。
+
+## 协议诊断日志
+
+INFO 日志只记录请求标识、状态、大小和耗时。确需查看完整协议正文时，可在隔离开发环境设置
+`WORKFLOW_ENGINE_PROTOCOL_LOGGING=true`；认证 Header 默认仍会脱敏。如联调必须查看原始认证 Header，
+再显式设置 `WORKFLOW_ENGINE_PROTOCOL_INCLUDE_SENSITIVE_HEADERS=true`。正文和敏感 Header 可能包含业务
+数据或凭证，禁止在生产长期启用，也不要未经清洗附到公开 Issue 或 PR。
 
 ## 智能体认证配置
 
