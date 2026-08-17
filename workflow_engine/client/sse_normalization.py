@@ -56,7 +56,10 @@ def _parse_with_unknown(text, message, ignore_unknown_fields=False, **kwargs):
             if isinstance(data, dict):
                 if not _STREAM_RESPONSE_KEYS.intersection(data):
                     logger = __import__("loguru").logger
-                    logger.warning(f"[A2A] Non-SSE response from server: {text[:2048]}")
+                    logger.warning(
+                        f"[A2A] Non-SSE response from server: body_chars={len(text)}"
+                    )
+                    logger.trace(f"[A2A] Non-SSE response body: {text[:2048]}")
                 data = _normalize_stream_response(data)
                 text = _json.dumps(data)
         except Exception:

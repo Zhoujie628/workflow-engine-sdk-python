@@ -116,7 +116,7 @@ class A2ATransport:
             logger.info("A2ATClient initialized")
             return client
         except Exception as e:
-            logger.warning(f"Failed to init A2ATClient: {e}")
+            logger.opt(exception=True).warning(f"Failed to init A2ATClient: {e}")
             return None
 
     def _create_httpx_client(self, ssl_verify, ca_certs_path) -> httpx.AsyncClient:
@@ -131,7 +131,7 @@ class A2ATransport:
         return httpx.AsyncClient(
             timeout=httpx.Timeout(connect=60, read=self._send_timeout_seconds, write=60, pool=10.0),
             verify=ssl_ctx,
-            follow_redirects=True,
+            follow_redirects=False,
         )
 
     @staticmethod
@@ -195,6 +195,17 @@ class A2ATransport:
     # ------------------------------------------------------------------
 
     def create_a2a_client(self, agent_card):
+        requires_auth = bool(
+            agent_card.security_schemes and agent_card.security_requirements
+        )
+        if (
+            requires_auth
+            and self._auth_provider is None
+            and not self._auth_manager.has_credentials(agent_card.name)
+        ):
+            raise RuntimeError(
+                f"Agent {agent_card.name} declares authentication but no credentials are configured"
+            )
         interfaces = [
             iface for iface in agent_card.supported_interfaces
             if iface.protocol_binding

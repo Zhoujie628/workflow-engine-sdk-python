@@ -44,12 +44,10 @@ async def load_psop(
     import httpx
     from workflow_engine.core.models import Workflow
     url = f"{base_url}/api/v1/orchestrate/psop/{psop_id}"
-    params = {}
-    if access_token:
-        params["access_token"] = access_token
+    headers = {"Authorization": f"Bearer {access_token}"} if access_token else {}
     logger.info(f"[Registry] Loading PSOP from {url} (ssl_verify={ssl_verify})")
-    async with httpx.AsyncClient(verify=ssl_verify, timeout=30, follow_redirects=True) as client:
-        resp = await client.get(url, params=params)
+    async with httpx.AsyncClient(verify=ssl_verify, timeout=30, follow_redirects=False) as client:
+        resp = await client.get(url, headers=headers)
         resp.raise_for_status()
         data = resp.json()
     wf = Workflow.from_dict(data.get("data", data))
@@ -75,13 +73,12 @@ async def search_psop(
     import httpx
     from workflow_engine.core.models import WorkflowSearchResult
     url = f"{base_url}/api/v1/orchestrate/search"
-    params = {}
-    if access_token:
-        params["access_token"] = access_token
+    headers = {"Authorization": f"Bearer {access_token}"} if access_token else {}
     body = {"intent": intent, "top_n": top_n}
-    logger.info(f"[Registry] Searching PSOP at {url} (intent={intent[:60]}, top_n={top_n})")
-    async with httpx.AsyncClient(verify=ssl_verify, timeout=30, follow_redirects=True) as client:
-        resp = await client.post(url, json=body, params=params)
+    logger.info(f"[Registry] Searching PSOP at {url} (intent_chars={len(intent)}, top_n={top_n})")
+    logger.trace(f"[Registry] Search intent={intent}")
+    async with httpx.AsyncClient(verify=ssl_verify, timeout=30, follow_redirects=False) as client:
+        resp = await client.post(url, json=body, headers=headers)
         resp.raise_for_status()
         data = resp.json()
     raw_results = data.get("data", [])
@@ -94,7 +91,7 @@ async def search_psop(
 class RegistryClient:
     """Fetches AgentCards from the Registry Center."""
 
-    def __init__(self, url: str, ssl_verify: bool = False, verify_ssl: bool = None):
+    def __init__(self, url: str, ssl_verify: bool = True, verify_ssl: bool = None):
         # Accept the legacy ``verify_ssl`` keyword for backward compatibility;
         # ``ssl_verify`` matches WorkflowEngineClient / load_psop / execute_psop.
         if verify_ssl is not None:

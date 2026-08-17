@@ -25,10 +25,23 @@ import json
 import time
 from pathlib import Path
 from typing import Dict, Optional
+from urllib.parse import urlsplit, urlunsplit
 import httpx
 from loguru import logger
 
 from workflow_engine.client.credential_crypto import decrypt_if_needed
+
+
+def _safe_url(value: str) -> str:
+    try:
+        parsed = urlsplit(value)
+        host = parsed.hostname or ""
+        if ":" in host and not host.startswith("["):
+            host = f"[{host}]"
+        netloc = f"{host}:{parsed.port}" if parsed.port is not None else host
+        return urlunsplit((parsed.scheme, netloc, parsed.path, "", ""))
+    except (TypeError, ValueError):
+        return "<invalid-url>"
 
 try:
     from a2a.client.auth import CredentialService
@@ -100,10 +113,17 @@ class AgentCredentialService(CredentialService if _A2A_AVAILABLE else object):
             if not username or not password:
                 return None
             body = {scheme_cfg.get("username_field","username"): username, scheme_cfg.get("password_field","password"): password}
-        client = self._httpx_client or httpx.AsyncClient(timeout=httpx.Timeout(connect=30, read=30, write=30, pool=5.0), verify=False)
+        client = self._httpx_client or httpx.AsyncClient(
+            timeout=httpx.Timeout(connect=30, read=30, write=30, pool=5.0),
+            verify=True,
+            follow_redirects=False,
+        )
         own_client = self._httpx_client is None
         try:
-            logger.info(f"[Auth] Login attempt: agent={self._agent_name}, method={method}, url={login_url}, content_type={content_type}, params={_sanitize_body(body)}")
+            logger.info(
+                f"[Auth] LOGIN_START agent={self._agent_name}, method={method}, "
+                f"url={_safe_url(login_url)}, content_type={content_type}, param_names={list(body)}"
+            )
             req_kwargs = {"method": method, "url": login_url}
             if content_type == "application/x-www-form-urlencoded":
                 req_kwargs["data"] = body
@@ -117,7 +137,10 @@ class AgentCredentialService(CredentialService if _A2A_AVAILABLE else object):
                 token = data.get("accessSession") or data.get("access_session") or data.get("access_token") or data.get("token")
             return token
         except Exception as e:
-            logger.error(f"[Auth] Login failed: agent={self._agent_name}, url={login_url}, error={e}")
+            logger.error(
+                f"[Auth] Login failed: agent={self._agent_name}, "
+                f"url={_safe_url(login_url)}, error={e}"
+            )
             return None
         finally:
             if own_client:
@@ -143,6 +166,7 @@ class AgentAuthManager:
     def __init__(self, config: Optional[Dict[str, dict]] = None, config_path: Optional[str] = None):
         self._config: Dict[str, dict] = {}
         self._services: Dict[str, AgentCredentialService] = {}
+        self._httpx_client: Optional[httpx.AsyncClient] = None
         if config:
             self._config = config
         elif config_path:
@@ -165,7 +189,9 @@ class AgentAuthManager:
         agent_creds = self._config.get(agent_name)
         if not agent_creds:
             return None
-        service = AgentCredentialService(agent_name, agent_creds)
+        service = AgentCredentialService(
+            agent_name, agent_creds, httpx_client=self._httpx_client
+        )
         self._services[agent_name] = service
         logger.info(f"[Auth] Created credential service for agent: {agent_name}")
         return service
@@ -174,6 +200,7 @@ class AgentAuthManager:
         return self._config.get(agent_name)
 
     def set_httpx_client(self, client: httpx.AsyncClient):
+        self._httpx_client = client
         for svc in self._services.values():
             svc.set_httpx_client(client)
 
@@ -211,19 +238,11 @@ class CustomAuthInterceptor(ClientCallInterceptor if _A2A_AVAILABLE else object)
                 accept_header = scheme_cfg.get("accept_header")
                 if accept_header:
                     args.context.service_parameters["Accept"] = accept_header
-                    logger.info(f"[CustomAuth] Override Accept header to {accept_header} for agent {getattr(args.agent_card, chr(39)+chr(110)+chr(97)+chr(109)+chr(101)+chr(39), chr(63))}")
+                    logger.info(
+                        f"[CustomAuth] Override Accept header to {accept_header} "
+                        f"for agent {getattr(args.agent_card, 'name', '?')}"
+                    )
                 return
 
     async def after(self, args: AfterArgs) -> None:
         pass
-
-
-def _sanitize_body(body: dict) -> dict:
-    """Mask sensitive fields (password, value, accessSession) for safe logging."""
-    sanitized = {}
-    for k, v in body.items():
-        if k.lower() in ("password", "value", "accesssession"):
-            sanitized[k] = "***"
-        else:
-            sanitized[k] = v
-    return sanitized
