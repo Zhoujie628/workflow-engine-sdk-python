@@ -27,6 +27,7 @@ in-workflow handler chain.
 """
 
 from abc import ABC, abstractmethod
+from collections import OrderedDict
 from typing import Any, Dict, Optional, List, TYPE_CHECKING
 from loguru import logger
 
@@ -52,9 +53,10 @@ class ExtensionHandler(ABC):
 
 class TaskTHandler(ExtensionHandler):
     extension_keyword = "Task-T"
+    _MAX_PROMPT_CACHE_ENTRIES = 256
 
     def __init__(self):
-        self._prompt_cache: Dict[str, str] = {}
+        self._prompt_cache: OrderedDict[tuple[str, str, str], str] = OrderedDict()
 
     async def before_send(self, agent_card, message_text, metadata, a2at_client=None, control_point=None):
         if not a2at_client:
@@ -74,9 +76,11 @@ class TaskTHandler(ExtensionHandler):
         if task_t_uri in metadata:
             logger.info(f"[Task-T] Metadata already preset, skipping generation")
             return metadata
-        cache_key = message_text
+        agent_name = getattr(agent_card, "name", "?")
+        cache_key = (agent_name, task_t_uri, message_text)
         if cache_key in self._prompt_cache:
-            cached = self._prompt_cache[cache_key]
+            cached = self._prompt_cache.pop(cache_key)
+            self._prompt_cache[cache_key] = cached
             metadata[task_t_uri] = cached
             logger.info(
                 f"[Task-T] Cache hit for '{getattr(agent_card, 'name', '?')}', "
@@ -90,6 +94,9 @@ class TaskTHandler(ExtensionHandler):
                 if hasattr(prompt_result, "prompt_text") and prompt_result.prompt_text:
                     metadata[task_t_uri] = prompt_result.prompt_text
                     self._prompt_cache[cache_key] = prompt_result.prompt_text
+                    self._prompt_cache.move_to_end(cache_key)
+                    while len(self._prompt_cache) > self._MAX_PROMPT_CACHE_ENTRIES:
+                        self._prompt_cache.popitem(last=False)
                     logger.info(f"[Task-T] Generated prompt for '{getattr(agent_card, 'name', '?')}', {len(prompt_result.prompt_text)} chars")
                     logger.debug(f"[Task-T] Prompt content: [{prompt_result.prompt_text}]")
             else:
@@ -98,7 +105,7 @@ class TaskTHandler(ExtensionHandler):
                     logger.warning(f"[Task-T] Prompt generation failed: {getattr(failure, 'message', '')}")
                     logger.info(f"[Task-T] Failure detail: {failure}")
         except Exception as e:
-            logger.warning(f"[Task-T] Failed: {e}")
+            logger.opt(exception=True).warning(f"[Task-T] Failed: {e}")
         return metadata
 
     async def after_receive(self, agent_card, result, a2at_client=None, control_point=None, event_callback=None):
@@ -131,23 +138,38 @@ class NegotiationTHandler(ExtensionHandler):
             if receive_result.get("needResponse", False):
                 metadata["negotiation_message"] = receive_result.get("message", "")
                 metadata["negotiation_context"] = receive_result
-                logger.info(f"[Negotiation-T] Agent '{getattr(agent_card, 'name', '?')}' requested negotiation: {metadata['negotiation_message']}")
+                negotiation_message = str(metadata["negotiation_message"])
+                logger.info(
+                    f"[Negotiation-T] Agent '{getattr(agent_card, 'name', '?')}' "
+                    f"requested negotiation: message_chars={len(negotiation_message)}"
+                )
+                logger.trace(
+                    f"[Negotiation-T] Negotiation message: {negotiation_message}"
+                )
         except Exception as e:
             msg = str(e) if e else ""
             if "Unsupported negotiation type" in msg:
                 logger.debug(f"[Negotiation-T] SDK receiveNegotiation unavailable for '{getattr(agent_card, 'name', '?')}' ({msg}), using fallback")
             else:
-                logger.warning(f"[Negotiation-T] receiveNegotiation failed for '{getattr(agent_card, 'name', '?')}': {msg}, using fallback")
+                logger.opt(exception=True).warning(f"[Negotiation-T] receiveNegotiation failed for '{getattr(agent_card, 'name', '?')}': {msg}, using fallback")
         if "negotiation_message" not in metadata or not metadata["negotiation_message"]:
             concern = metadata.get("negotiationConcern", "")
             if concern:
                 metadata["negotiation_message"] = concern
-                logger.info(f"[Negotiation-T] Agent '{getattr(agent_card, 'name', '?')}' concern: {concern}")
+                logger.info(
+                    f"[Negotiation-T] Agent '{getattr(agent_card, 'name', '?')}' "
+                    f"concern_chars={len(str(concern))}"
+                )
+                logger.trace(f"[Negotiation-T] Concern: {concern}")
             else:
                 fallback_text = self._extract_negotiation_text(metadata)
                 if fallback_text:
                     metadata["negotiation_message"] = fallback_text
-                    logger.info(f"[Negotiation-T] Agent '{getattr(agent_card, 'name', '?')}' negotiation (NEGOTIATION-T fallback): {fallback_text}")
+                    logger.info(
+                        f"[Negotiation-T] Agent '{getattr(agent_card, 'name', '?')}' "
+                        f"fallback_chars={len(str(fallback_text))}"
+                    )
+                    logger.trace(f"[Negotiation-T] Fallback text: {fallback_text}")
         result.metadata = metadata
         return result
 

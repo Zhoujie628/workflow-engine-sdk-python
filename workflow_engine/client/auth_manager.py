@@ -93,6 +93,12 @@ class AuthManager:
     def get_interceptors(self, agent_name: str) -> List[Any]:
         return self._interceptors.get(agent_name, [])
 
+    def has_credentials(self, agent_name: str) -> bool:
+        return bool(
+            self._auth_manager
+            and self._auth_manager.get_config(agent_name)
+        )
+
     def set_httpx_client(self, client):
         if self._auth_manager:
             self._auth_manager.set_httpx_client(client)

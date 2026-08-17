@@ -245,7 +245,7 @@ class WorkflowEngineClient:
                 if asyncio.iscoroutine(clarification):
                     clarification = await clarification
             except Exception as e:
-                logger.warning(f"[Negotiation] on_negotiation raised: {e}")
+                logger.opt(exception=True).warning(f"[Negotiation] on_negotiation raised: {e}")
                 clarification = None
         else:
             clarification = "Please proceed with the original task using available information."
@@ -320,7 +320,7 @@ class WorkflowEngineClient:
                         )
                         return dict(payload)
             except Exception as e:
-                logger.warning(
+                logger.opt(exception=True).warning(
                     f"[Negotiation] continue_negotiation failed for "
                     f"'{agent_name}': {e}; using fallback"
                 )

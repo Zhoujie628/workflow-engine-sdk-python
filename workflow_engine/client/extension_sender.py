@@ -175,29 +175,27 @@ class ExtensionSender:
             if hasattr(prompt_result, 'success') and prompt_result.success:
                 text = getattr(prompt_result, 'prompt_text', None)
                 if text:
+                    logger.info(f"[ExtensionSender] Task-T prompt generated: {len(text)} chars")
                     return text
             else:
                 failure = getattr(prompt_result, 'failure', None)
                 if failure:
                     logger.warning('[ExtensionSender] SDK Task-T prompt generation failed: ' + str(getattr(failure, 'message', '')))
         except Exception as e:
-            logger.warning('[ExtensionSender] SDK Task-T prompt generation error: ' + str(e))
+            logger.opt(exception=True).warning('[ExtensionSender] SDK Task-T prompt generation error: ' + str(e))
         return ''
 
     def generate_negotiation_prompt(self, natural_language_input: str) -> str:
         """Generate Negotiation-T prompt text. Reserved for SDK support."""
-        if not self._transport.get_a2at_client():
-            return ''
+        logger.debug("[ExtensionSender] Negotiation-T prompt generation not yet supported by A2A-T SDK")
         return ''
 
     def generate_authorization_prompt(self, natural_language_input: str) -> str:
         """Generate Authorization-T prompt text. Reserved for SDK support."""
-        if not self._transport.get_a2at_client():
-            return ''
+        logger.debug("[ExtensionSender] Authorization-T prompt generation not yet supported by A2A-T SDK")
         return ''
 
     def generate_notification_prompt(self, natural_language_input: str) -> str:
         """Generate Notification-T prompt text. Reserved for SDK support."""
-        if not self._transport.get_a2at_client():
-            return ''
+        logger.debug("[ExtensionSender] Notification-T prompt generation not yet supported by A2A-T SDK")
         return ''
