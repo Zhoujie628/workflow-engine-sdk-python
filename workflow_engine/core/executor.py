@@ -28,6 +28,7 @@ from workflow_engine.core.models import (
     ExecutionResult, TaskRequest, TaskResponse, RouteDecision,
 )
 from workflow_engine.core.context_builder import ContextBuilder
+from workflow_engine.core.workflow_validator import TERMINAL_TARGETS, validate_workflow
 from workflow_engine.control.control_points import ControlPoint, EventCallback
 
 if TYPE_CHECKING:
@@ -46,6 +47,7 @@ class WorkflowExecutor:
         runtime_intent: str = "",
         lang: str = "zh",
     ):
+        validate_workflow(workflow)
         self.workflow = workflow
         self.control_point = control_point
         self.engine_client = engine_client
@@ -59,7 +61,8 @@ class WorkflowExecutor:
         self.context_builder = ContextBuilder(workflow, runtime_intent)
         self.step_outputs: Dict[str, Dict[str, Any]] = {}
         self.execution_history: List[Dict[str, Any]] = []
-        logger.info(f"[Executor] Workflow: {workflow.name}, steps={len(workflow.steps)}, intent={runtime_intent[:80] if runtime_intent else None}, lang={lang}")
+        self._failure_error: Optional[str] = None
+        logger.info(f"[Executor] Workflow: {workflow.name}, steps={len(workflow.steps)}, intent_chars={len(runtime_intent)}, lang={lang}")
 
     def _emit_event(self, event_type: str, data: Dict[str, Any]):
         if self.event_callback:
@@ -81,25 +84,39 @@ class WorkflowExecutor:
             i for i, s in enumerate(self.workflow.steps)
             if s.layer == 0 and not self.context_builder.get_step_predecessors(s.name)
         ])
+        activated: set[int] = set(pending)
         executed: set = set()
-        defer_count: Dict[int, int] = {}
         failed = False
+        self._failure_error = None
         try:
             while pending and not failed:
-                ready, deferred = self._collect_ready(pending, executed, defer_count)
+                ready, deferred = self._collect_ready(pending, activated, executed)
                 for idx in deferred:
                     pending.append(idx)
                 if not ready:
                     if deferred:
-                        await asyncio.sleep(0.05)
-                        continue
+                        blocked = [self.workflow.steps[idx].name for idx in deferred]
+                        logger.error(
+                            "[Executor] BLOCKED_STEPS "
+                            f"steps={blocked}, reason=active_predecessor_missing_output"
+                        )
+                        self._emit_event(
+                            "error",
+                            {"error": "Workflow contains blocked steps", "steps": blocked},
+                        )
+                        self._failure_error = (
+                            f"Workflow contains blocked steps: {blocked}"
+                        )
+                        failed = True
                     break
                 executed.update(ready)
                 results = await asyncio.gather(
                     *[self._execute_step(idx) for idx in ready],
                     return_exceptions=True,
                 )
-                failed = self._process_results(ready, results, pending, executed)
+                failed = self._process_results(
+                    ready, results, pending, activated, executed
+                )
         except Exception as e:
             logger.critical(f"DAG traversal error: {e}", exc_info=True)
             return ExecutionResult(success=False, history=self.execution_history,
@@ -108,10 +125,11 @@ class WorkflowExecutor:
         logger.info(f"[Executor] Workflow completed: {self.workflow.name}, {len(self.execution_history)} task(s) executed")
         return ExecutionResult(success=not failed, history=self.execution_history,
                                step_outputs=self.step_outputs,
-                               error=("Step execution failed" if failed else None))
+                               error=(self._failure_error or "Step execution failed") if failed else None)
 
-    def _collect_ready(self, pending: deque, executed: set,
-                       defer_count: Dict[int, int]) -> tuple:
+    def _collect_ready(
+        self, pending: deque, activated: set[int], executed: set[int]
+    ) -> tuple:
         """Drain pending into ready (predecessors satisfied) and deferred."""
         ready: List[int] = []
         deferred: List[int] = []
@@ -121,14 +139,18 @@ class WorkflowExecutor:
                 continue
             step = self.workflow.steps[idx]
             predecessors = self.context_builder.get_step_predecessors(step.name)
-            if all(p in self.step_outputs for p in predecessors):
+            active_predecessors = [
+                predecessor
+                for predecessor in predecessors
+                if (
+                    (predecessor_index := self.context_builder.find_step_index(predecessor))
+                    is not None
+                    and predecessor_index in activated
+                )
+            ]
+            if all(p in self.step_outputs for p in active_predecessors):
                 ready.append(idx)
             else:
-                dc = defer_count.get(idx, 0) + 1
-                if dc > len(self.workflow.steps):
-                    executed.add(idx)
-                    continue
-                defer_count[idx] = dc
                 deferred.append(idx)
         return ready, deferred
 
@@ -153,20 +175,29 @@ class WorkflowExecutor:
         logger.info(f"[Timing] Step '{step.name}' total: {time.time()-t_step:.2f}s, success={success}")
         return step.name, step_result, success, next_indices
 
-    def _process_results(self, ready: List[int], results: list,
-                         pending: deque, executed: set) -> bool:
+    def _process_results(
+        self,
+        ready: List[int],
+        results: list,
+        pending: deque,
+        activated: set[int],
+        executed: set[int],
+    ) -> bool:
         """Process asyncio.gather results, enqueue next steps. Returns failed."""
         for idx, result in zip(ready, results):
             if isinstance(result, Exception):
                 step = self.workflow.steps[idx]
                 logger.error(f"Step {step.name} raised: {result}")
                 self._emit_event("error", {"step": step.name, "error": str(result)})
+                self._failure_error = str(result)
                 return True
             _, _, success, next_indices = result
             if not success:
+                self._failure_error = f"Step '{self.workflow.steps[idx].name}' execution failed"
                 return True
             for nxt in reversed(next_indices):
                 if nxt not in executed and nxt not in pending:
+                    activated.add(nxt)
                     pending.appendleft(nxt)
         return False
 
@@ -182,7 +213,7 @@ class WorkflowExecutor:
                                     context=context_message, step_name=step.name, subtask_index=subtask_index)
             self._emit_event("task_request", {"step": step.name, "agent": task.agent, "task": task.description})
             logger.info(f"[Executor] Dispatching task: step={step.name}, agent={task.agent}, subtask_index={subtask_index}, desc={task.description}")
-            logger.debug(f"[Executor] Task message to {task.agent}: [{task_message}]")
+            logger.trace(f"[Executor] Task message to {task.agent}: [{task_message}]")
             t_task = time.time()
             try:
                 # SELF_LOOP steps are handled locally without sending an
@@ -198,7 +229,7 @@ class WorkflowExecutor:
                 status = "success" if response.success else "failed"
                 logger.info(f"[Executor] Task {task.description[:60]} -> {task.agent}: {status}")
                 if response.success and response.output:
-                    logger.debug(f"[Executor] Task output from {task.agent}: [{response.output}]")
+                    logger.trace(f"[Executor] Task output from {task.agent}: [{response.output}]")
                 self.execution_history.append({"step": step.name, "task": task.description, "agent": task.agent,
                     "status": status,
                     "output": response.output if response.success else (response.error or "")})
@@ -258,16 +289,24 @@ class WorkflowExecutor:
                     route_context[ref] = self.step_outputs[ref]
         route_context[step.name] = step_result
         decision = await self.control_point.on_route(step.name, route_context, step.next)
+        if decision is None or not decision.next_step:
+            raise ValueError(f"on_route returned no target for step '{step.name}'")
+        allowed = [jc.step for jc in step.next]
+        if decision.next_step not in allowed:
+            raise ValueError(
+                f"on_route returned '{decision.next_step}' for step '{step.name}', "
+                f"allowed targets are {allowed}"
+            )
         logger.info(f"Route for '{step.name}': {decision.next_step} ({decision.reason})")
         self._emit_event("route_decision", {"step": step.name, "next": decision.next_step, "reason": decision.reason})
+        if decision.next_step in TERMINAL_TARGETS:
+            return []
         idx = self.context_builder.find_step_index(decision.next_step)
         if idx is None:
-            allowed = [jc.step for jc in step.next]
-            logger.warning(
-                f"on_route returned '{decision.next_step}' for step '{step.name}', "
-                f"not in allowed next steps {allowed}; workflow will end."
+            raise RuntimeError(
+                f"Validated route target is missing from workflow: {decision.next_step}"
             )
-        return [idx] if idx is not None else []
+        return [idx]
 
 
     @property

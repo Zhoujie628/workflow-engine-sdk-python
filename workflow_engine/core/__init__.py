@@ -24,11 +24,12 @@ from workflow_engine.core.models import (
 )
 from workflow_engine.core.context_builder import ContextBuilder
 from workflow_engine.core.executor import WorkflowExecutor
+from workflow_engine.core.workflow_validator import validate_workflow, find_workflow_errors
 
 __all__ = [
     "Workflow", "WorkflowStep", "Task", "JumpCondition",
     "StepType", "TaskStatus", "ExecutionResult",
     "SendMessageResult", "TaskRequest", "TaskResponse", "RouteDecision",
     "WorkflowSearchResult",
-    "ContextBuilder", "WorkflowExecutor",
+    "ContextBuilder", "WorkflowExecutor", "validate_workflow", "find_workflow_errors",
 ]
