@@ -1,0 +1,6 @@
+# Temporary bootstrap while a2a-t-sdk 1.1.0 is not yet published to PyPI.
+# Remove the git line once the PyPI release is available; the version floor in
+# pyproject.toml already targets 1.1.0.
+a2a-t-sdk @ git+https://github.com/project-openan/a2a-t-sdk-python.git@554dfc7
+
+-e .[dev]
