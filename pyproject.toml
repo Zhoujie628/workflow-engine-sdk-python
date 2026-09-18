@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "workflow-exec-engine"
-version = "0.0.3"
+version = "0.0.9"
 description = "Standalone workflow execution SDK for A2A-T multi-agent orchestration"
 readme = "README.md"
 license = "Apache-2.0"
@@ -18,15 +18,13 @@ classifiers = [
     "Development Status :: 2 - Pre-Alpha",
     "Intended Audience :: Developers",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
-    "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Topic :: Software Development :: Libraries",
 ]
 dependencies = [
-    "a2a-sdk>=1.0.0",
-    "a2a-t-sdk>=1.0.0",
+    "a2a-sdk>=1.1.2,<2",
+    "a2a-t-sdk>=1.0.9,<2",
     "httpx>=0.27.0",
     "loguru>=0.7.0",
     "protobuf>=4.25.0",
@@ -34,10 +32,24 @@ dependencies = [
     "cryptography>=42.0.0",
 ]
 
+[project.optional-dependencies]
+dev = [
+    "build>=1.2.0",
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+]
+
 [project.urls]
-Homepage = "https://github.com/Zhoujie628/workflow-exec-engine"
-Documentation = "https://github.com/Zhoujie628/workflow-exec-engine#readme"
-Repository = "https://github.com/Zhoujie628/workflow-exec-engine"
+Homepage = "https://github.com/project-openan/workflow-engine-sdk-python"
+Documentation = "https://github.com/project-openan/workflow-engine-sdk-python#readme"
+Repository = "https://github.com/project-openan/workflow-engine-sdk-python"
+Issues = "https://github.com/project-openan/workflow-engine-sdk-python/issues"
+Changelog = "https://github.com/project-openan/workflow-engine-sdk-python/blob/main/CHANGELOG.md"
 
 [tool.setuptools.packages.find]
 include = ["workflow_engine*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["."]
+python_files = ["test_*.py"]

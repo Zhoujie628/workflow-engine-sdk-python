@@ -44,12 +44,10 @@ async def load_psop(
     import httpx
     from workflow_engine.core.models import Workflow
     url = f"{base_url}/api/v1/orchestrate/psop/{psop_id}"
-    params = {}
-    if access_token:
-        params["access_token"] = access_token
+    headers = {"Authorization": f"Bearer {access_token}"} if access_token else {}
     logger.info(f"[Registry] Loading PSOP from {url} (ssl_verify={ssl_verify})")
-    async with httpx.AsyncClient(verify=ssl_verify, timeout=30, follow_redirects=True) as client:
-        resp = await client.get(url, params=params)
+    async with httpx.AsyncClient(verify=ssl_verify, timeout=30, follow_redirects=False) as client:
+        resp = await client.get(url, headers=headers)
         resp.raise_for_status()
         data = resp.json()
     wf = Workflow.from_dict(data.get("data", data))
@@ -75,13 +73,12 @@ async def search_psop(
     import httpx
     from workflow_engine.core.models import WorkflowSearchResult
     url = f"{base_url}/api/v1/orchestrate/search"
-    params = {}
-    if access_token:
-        params["access_token"] = access_token
+    headers = {"Authorization": f"Bearer {access_token}"} if access_token else {}
     body = {"intent": intent, "top_n": top_n}
-    logger.info(f"[Registry] Searching PSOP at {url} (intent={intent[:60]}, top_n={top_n})")
-    async with httpx.AsyncClient(verify=ssl_verify, timeout=30, follow_redirects=True) as client:
-        resp = await client.post(url, json=body, params=params)
+    logger.info(f"[Registry] Searching PSOP at {url} (intent_chars={len(intent)}, top_n={top_n})")
+    logger.trace(f"[Registry] Search intent={intent}")
+    async with httpx.AsyncClient(verify=ssl_verify, timeout=30, follow_redirects=False) as client:
+        resp = await client.post(url, json=body, headers=headers)
         resp.raise_for_status()
         data = resp.json()
     raw_results = data.get("data", [])
@@ -94,11 +91,7 @@ async def search_psop(
 class RegistryClient:
     """Fetches AgentCards from the Registry Center."""
 
-    def __init__(self, url: str, ssl_verify: bool = False, verify_ssl: bool = None):
-        # Accept the legacy ``verify_ssl`` keyword for backward compatibility;
-        # ``ssl_verify`` matches WorkflowEngineClient / load_psop / execute_psop.
-        if verify_ssl is not None:
-            ssl_verify = verify_ssl
+    def __init__(self, url: str, ssl_verify: bool = True):
         self.url = url.rstrip("/")
         self.ssl_verify = ssl_verify
 
@@ -112,18 +105,14 @@ class RegistryClient:
             data = resp.json()
             raw_cards = data.get("agentCards", data.get("data", []))
         logger.info(f"[Registry] Received {len(raw_cards)} agent card(s)")
-        try:
-            from a2a.types import AgentCard
-            from google.protobuf.json_format import Parse
-            cards = []
-            for raw in raw_cards:
-                normalized = normalize_agent_dict(raw)
-                cards.append(Parse(json.dumps(normalized), AgentCard()))
-            logger.info(f"[Registry] Parsed {len(cards)} AgentCard(s) into protobuf objects")
-            return cards
-        except ImportError:
-            logger.info(f"[Registry] a2a-sdk not available, returning raw dicts")
-            return raw_cards
+        from a2a.types import AgentCard
+        from google.protobuf.json_format import Parse
+        cards = []
+        for raw in raw_cards:
+            normalized = normalize_agent_dict(raw)
+            cards.append(Parse(json.dumps(normalized), AgentCard()))
+        logger.info(f"[Registry] Parsed {len(cards)} AgentCard(s) into protobuf objects")
+        return cards
 
     async def fetch_agent_card(self, name: str, organization: str = None) -> Any:
         """Fetch a single AgentCard by name."""
@@ -141,16 +130,12 @@ class RegistryClient:
                 logger.warning(f"[Registry] Agent card not found: name={name}")
                 return None
             raw = cards[0]
-            try:
-                from a2a.types import AgentCard
-                from google.protobuf.json_format import Parse
-                normalized = normalize_agent_dict(raw)
-                card = Parse(json.dumps(normalized), AgentCard())
-                logger.info(f"[Registry] Agent card parsed: name={name}")
-                return card
-            except ImportError:
-                logger.info(f"[Registry] a2a-sdk not available, returning raw dict")
-                return raw
+            from a2a.types import AgentCard
+            from google.protobuf.json_format import Parse
+            normalized = normalize_agent_dict(raw)
+            card = Parse(json.dumps(normalized), AgentCard())
+            logger.info(f"[Registry] Agent card parsed: name={name}")
+            return card
 
     async def register_agent_card(self, agent_card) -> dict:
         """Register or update an AgentCard in the registry.
@@ -160,17 +145,20 @@ class RegistryClient:
         RegistryClient.registerAgentCard.
         """
         import httpx
+        if isinstance(agent_card, dict):
+            card_payload = agent_card
+        else:
+            from google.protobuf.json_format import MessageToDict
+            card_payload = MessageToDict(agent_card)
         url = f"{self.url}/rest/v1/registry-center/agent-cards"
-        payload = {"agentCards": [agent_card]}
-        logger.info(f"[Registry] Registering agent card: name={agent_card.get('name') if isinstance(agent_card, dict) else getattr(agent_card, 'name', '?')}")
+        payload = {"agentCards": [card_payload]}
+        logger.info(f"[Registry] Registering agent card: name={card_payload.get('name', '?')}")
         async with httpx.AsyncClient(verify=self.ssl_verify, timeout=30) as client:
             resp = await client.post(url, json=payload)
+            resp.raise_for_status()
             result = resp.json()
-            if resp.status_code in (200, 201):
-                logger.info(f"[Registry] Agent card registered")
-            else:
-                logger.warning(f"[Registry] Registration returned {resp.status_code}: {resp.text}")
-            return result
+        logger.info(f"[Registry] Agent card registered: name={card_payload.get('name', '?')}")
+        return result
 
     @property
     def base_url(self) -> str:

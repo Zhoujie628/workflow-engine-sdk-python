@@ -33,8 +33,6 @@ import base64
 import secrets
 from typing import Optional
 
-from loguru import logger
-
 _ENV_KEY = "A2AT_CRED_KEY"
 _PREFIX = "enc:"
 _IV_LENGTH = 12  # 96-bit IV for GCM
@@ -58,27 +56,28 @@ def decrypt_if_needed(value: Optional[str]) -> Optional[str]:
         return value
     key_hex = _resolve_key()
     if not key_hex or not key_hex.strip():
-        logger.warning(
-            f"[CredentialCrypto] Encrypted value found but {_ENV_KEY} not set, using as-is"
+        raise RuntimeError(
+            f"Encrypted credential found but {_ENV_KEY} is not configured"
         )
-        return value
     try:
         encoded = value[len(_PREFIX):]
         parts = encoded.split(":", 1)
         if len(parts) != 2:
-            logger.error("[CredentialCrypto] Invalid encrypted format, expected enc:<iv>:<ciphertext>")
-            return value
+            raise ValueError(
+                "Invalid encrypted credential format; expected enc:<iv>:<ciphertext>"
+            )
         iv = base64.b64decode(parts[0])
         ciphertext_and_tag = base64.b64decode(parts[1])
-        key_bytes = bytes.fromhex(key_hex)
+        key_bytes = _decode_key(key_hex)
         ciphertext = ciphertext_and_tag[:-_TAG_LENGTH]
         tag = ciphertext_and_tag[-_TAG_LENGTH:]
         from cryptography.hazmat.primitives.ciphers.aead import AESGCM
         plaintext = AESGCM(key_bytes).decrypt(iv, ciphertext + tag, None)
         return plaintext.decode("utf-8")
     except Exception as e:
-        logger.error(f"[CredentialCrypto] Decryption failed: {e}")
-        return value
+        if isinstance(e, (RuntimeError, ValueError)):
+            raise
+        raise RuntimeError("Credential decryption failed") from e
 
 
 def encrypt(plaintext: str) -> str:
@@ -90,7 +89,7 @@ def encrypt(plaintext: str) -> str:
     key_hex = _resolve_key()
     if not key_hex or not key_hex.strip():
         raise RuntimeError(f"{_ENV_KEY} environment variable not set")
-    key_bytes = bytes.fromhex(key_hex)
+    key_bytes = _decode_key(key_hex)
     iv = secrets.token_bytes(_IV_LENGTH)
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM
     ciphertext_and_tag = AESGCM(key_bytes).encrypt(iv, plaintext.encode("utf-8"), None)
@@ -100,3 +99,16 @@ def encrypt(plaintext: str) -> str:
         + ":"
         + base64.b64encode(ciphertext_and_tag).decode("ascii")
     )
+
+
+def _decode_key(key_hex: str) -> bytes:
+    """Decode and validate the required 256-bit AES key."""
+    normalized = key_hex.strip()
+    if len(normalized) != 64:
+        raise ValueError(
+            "A2AT_CRED_KEY must contain exactly 64 hexadecimal characters (32 bytes)"
+        )
+    try:
+        return bytes.fromhex(normalized)
+    except ValueError as exc:
+        raise ValueError("A2AT_CRED_KEY contains non-hexadecimal characters") from exc
