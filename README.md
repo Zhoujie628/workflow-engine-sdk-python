@@ -2,7 +2,7 @@
 
 面向宿主智能体的嵌入式工作流执行引擎。引擎负责工作流 DAG、A2A 消息封装、任务与会话关联、远端任务等待、Negotiation-T 交互循环和生命周期；宿主负责业务输入解释、A2A-T 内容生成与语义校验，以及路由和协商决策。
 
-Python 与 Java 版本遵循同一业务契约。Python 当前要求 Python 3.12+、`a2a-sdk>=1.1.2,<2` 和 `a2a-t-sdk>=1.1.0,<2`。
+Python 与 Java 版本遵循同一业务契约。Python 当前要求 Python 3.12+、`a2a-sdk>=1.1.2,<2` 和 `a2a-t-sdk>=1.0.9,<2`。
 
 ## 安装
 
@@ -125,6 +125,3 @@ python -m pip install -r requirements-dev.txt
 python -m pytest -q
 python -m build
 ```
-
-`requirements-dev.txt` is a temporary bootstrap that installs the current
-`a2a-t-sdk` source revision until its 1.1.0 release reaches PyPI.

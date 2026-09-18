@@ -5,13 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.0.4] - 2026-09-18
 
 ### Changed
 - Align the business callback contract with the Java engine: callbacks prepare final content and never receive the transport client.
 - Replace rendered Markdown predecessor context with typed `WorkflowInput` and ordered task outputs.
 - Evaluate every conditional outgoing edge independently; unconditional edges always pass and a node may activate zero through N successors.
-- Integrate `a2a-t-sdk>=1.1.0,<2` core metadata types while keeping content generation and semantic validation in host code; remove implicit Task-T handlers and legacy negotiation schemas.
+- Integrate `a2a-t-sdk>=1.0.9,<2` core metadata types while keeping content generation and semantic validation in host code; remove implicit Task-T handlers and legacy negotiation schemas.
 
 ### Added
 - Structured response evidence, protocol-to-business result mapping, safe `BusinessFailure`, and standard A2A error mapping.
