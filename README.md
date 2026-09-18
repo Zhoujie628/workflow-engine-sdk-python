@@ -121,7 +121,7 @@ await client.subscribe_to_task(agent_name, task_id, on_event)
 - [英文 README](README_en.md)
 
 ```bash
-python -m pip install -r requirements-dev.txt
+python -m pip install -e ".[dev]"
 python -m pytest -q
 python -m build
 ```

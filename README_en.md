@@ -113,10 +113,7 @@ Only controlled development environments should use `ssl_verify=False`. A caller
 - [Chinese README](README.md)
 
 ```bash
-python -m pip install -r requirements-dev.txt
+python -m pip install -e ".[dev]"
 python -m pytest -q
 python -m build
 ```
-
-`requirements-dev.txt` is a temporary bootstrap that installs the current
-`a2a-t-sdk` source revision until its 1.1.0 release reaches PyPI.

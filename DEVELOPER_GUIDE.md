@@ -7,8 +7,7 @@
 - `a2a-t-sdk>=1.0.9,<2` (the engine uses its core metadata contract; host callbacks use its content APIs)
 
 ```bash
-# When validating an SDK source revision before it reaches the configured package index:
-python -m pip install -r requirements-dev.txt
+python -m pip install -e ".[dev]"
 python -m pytest -q
 ```
 
