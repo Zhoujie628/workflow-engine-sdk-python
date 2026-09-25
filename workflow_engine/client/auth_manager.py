@@ -1,4 +1,4 @@
-﻿# Copyright (c) 2026 Huawei Technologies Co., Ltd.
+# Copyright (c) 2026 Huawei Technologies Co., Ltd.
 # All Rights Reserved.
 #
 # SPDX-License-Identifier: Apache-2.0
@@ -33,6 +33,7 @@ except ImportError:
 from workflow_engine.client.credential_service import AgentAuthManager, CustomAuthInterceptor
 from workflow_engine.client.extension_interceptor import ExtensionInterceptor
 from workflow_engine.client.auth_provider import AuthProvider
+from workflow_engine.client.protocol_logger import register_sensitive_header
 
 
 class AuthManager:
@@ -129,6 +130,8 @@ class AuthProviderInterceptor(ClientCallInterceptor if _A2A_AUTH_AVAILABLE else 
                 raise RuntimeError(
                     f"Authentication header conflict for agent {self._agent_name}: {name}"
                 )
+            # Everything an AuthProvider contributes is authentication material.
+            register_sensitive_header(name)
             args.context.service_parameters[name] = value
         if headers:
             logger.info(f"[AuthProvider] Injected {len(headers)} header(s) for {self._agent_name}")

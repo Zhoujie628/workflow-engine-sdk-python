@@ -99,6 +99,11 @@ class WorkflowEngineClient:
     def httpx_client(self) -> httpx.AsyncClient:
         return self._transport.httpx_client
 
+    @property
+    def task_poll_interval_seconds(self) -> float:
+        """Fallback poll interval used only after a response stream is interrupted."""
+        return self._transport.task_poll_interval_seconds
+
     def get_card(self, agent_name: str):
         return self._transport.get_card(agent_name)
 
@@ -119,21 +124,36 @@ class WorkflowEngineClient:
         content: MessageContent,
         context_id: Optional[str] = None,
         task_id: Optional[str] = None,
+        timeout_seconds: Optional[float] = None,
     ) -> AsyncIterator[A2AStreamEvent]:
-        """Stream normalized A2A events without exposing transport internals."""
+        """Stream normalized A2A events without exposing transport internals.
+
+        ``timeout_seconds`` bounds the WHOLE stream rather than a single read:
+        the transport's read timeout only fires on an idle socket, so a server
+        trickling a byte inside that window could otherwise hold the stream open
+        forever. It defaults to the same interaction deadline ``dispatch``
+        already enforces, so both public paths expire together; pass a larger
+        value for a stream that legitimately runs longer.
+        """
         if self._closed:
             raise RuntimeError("Workflow client closed")
         card = self._transport.get_card(agent_name)
         if card is None:
             raise RuntimeError(f"Agent not found: {agent_name}")
         self._transport.validate_content_extensions(card, content)
-        client = self._transport.create_a2a_client(card)
+        client = self._transport.client_for(agent_name)
         request = self._transport.build_send_request(
             content, context_id or str(uuid.uuid4()), task_id,
         )
-        async for response in client.send_message(request):
-            self._transport.log_response_event(agent_name, response)
-            yield self._transport.parse_stream_event(response)
+        deadline = (
+            self.callback_timeout_seconds if timeout_seconds is None else timeout_seconds
+        )
+        if deadline <= 0:
+            raise ValueError("timeout_seconds must be positive")
+        async with asyncio.timeout(deadline):
+            async for response in client.send_message(request):
+                self._transport.log_response_event(agent_name, response)
+                yield self._transport.parse_stream_event(response)
 
     @staticmethod
     def _default_input():
@@ -194,9 +214,9 @@ class WorkflowEngineClient:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise TimeoutError("Task interaction timed out")
-            result = await asyncio.wait_for(
-                self._send_once(card, request, current_content, context_id, remote_task_id),
-                timeout=remaining,
+            result = await self._send_or_recover(
+                card, request, current_content, context_id, remote_task_id,
+                interaction, deadline,
             )
             if result.task is not None and result.task.id:
                 interaction["remote_task_id"] = result.task.id
@@ -229,25 +249,42 @@ class WorkflowEngineClient:
                 )
                 self._validate_remote_identity(result, context_id, remote_task_id)
 
-            if result.task_state != "TASK_STATE_INPUT_REQUIRED":
-                return await self._finish_remote_result(
-                    request.agent_name, result, interaction,
+            # A taskless bare message may carry a Propose: A2A-T lets the remote
+            # negotiate *before* creating any task. Interpreting such a message as
+            # a final answer would hand the host a negotiation request as if it
+            # were the business result, with no error to notice.
+            candidate: Optional[ReceivedMessage] = None
+            taskless = result.task_state != "TASK_STATE_INPUT_REQUIRED"
+            if taskless:
+                candidate = (
+                    self._negotiation_candidate(result) if result.task is None else None
                 )
+                if candidate is None:
+                    return await self._finish_remote_result(
+                        request.agent_name, result, interaction,
+                    )
             interaction["negotiation_started"] = True
             if exchange_number >= self._max_negotiation_exchanges:
                 raise RuntimeError("Negotiation exchange budget exhausted; no Abort generated")
             if callbacks is None:
                 raise RuntimeError("on_negotiation handler is required")
-            if remote_task_id is None:
+            if not taskless and remote_task_id is None:
                 raise ValueError("INPUT_REQUIRED has no remote task identity")
 
-            received = self._negotiation_response(result)
+            received = candidate if taskless else self._negotiation_response(result)
             context = self._negotiation_context(received)
             previous_context = contexts.get(context.id)
             self._validate_context_progression(previous_context, context)
             contexts[context.id] = context
             key = (remote_task_id, context.id, context.round)
             while key in answered:
+                if remote_task_id is None:
+                    # Without a task there is nothing to poll, and re-sending the
+                    # same reply for the same round would spin forever.
+                    raise RuntimeError(
+                        "Remote repeated a taskless negotiation round "
+                        f"(context={context.id}, round={context.round})"
+                    )
                 await asyncio.sleep(0.25)
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
@@ -358,17 +395,89 @@ class WorkflowEngineClient:
                 f"task_id={task_id}, error={type(exc).__name__}: {exc}"
             )
 
-    async def _send_once(
-        self, card, request: TaskRequest, content: MessageContent,
-        context_id: str, remote_task_id: Optional[str],
+    async def _send_or_recover(
+        self,
+        card,
+        request: TaskRequest,
+        content: MessageContent,
+        context_id: str,
+        remote_task_id: Optional[str],
+        interaction: Dict[str, Any],
+        deadline: float,
     ) -> SendMessageResult:
+        """Send once, recovering from a dropped response stream by polling the task.
+
+        An intermediary (API gateway, load balancer) may close an idle SSE stream
+        while the remote task is still running. That is a transport fault, not a
+        business failure: the task must be awaited rather than abandoned or
+        cancelled, so polling takes over until the task leaves a non-terminal
+        state or the deadline expires.
+
+        The split is by *phase*, never by exception type: local preparation
+        (extension validation, agent lookup, request building) runs outside the
+        recoverable region, so a fault there still propagates and lets the caller
+        cancel the remote task. Everything raised while the stream is being
+        consumed is a recovery candidate, because a transport may surface a
+        dropped connection as any exception class at all.
+        """
         self._emit(EventType.AGENT_REQUEST, {"agent": request.agent_name, "content": content})
         self._transport.validate_content_extensions(card, content)
-        client = self._transport.create_a2a_client(card)
+        client = self._transport.client_for(request.agent_name)
         send_request = self._transport.build_send_request(content, context_id, remote_task_id)
-        return await self._transport.consume_stream(
-            client, send_request, self._forward_intermediate_event, request.agent_name,
-        )
+
+        def forward_intermediate(event_type: str, data: Dict[str, Any]) -> None:
+            # Remember the remote task identity the moment the stream reveals it.
+            # If an intermediary drops the connection afterwards, the task is still
+            # pollable instead of having to be abandoned or cancelled.
+            revealed = data.get("task_id")
+            if revealed:
+                interaction["remote_task_id"] = revealed
+            self._forward_intermediate_event(event_type, data)
+
+        try:
+            return await asyncio.wait_for(
+                self._transport.consume_stream(
+                    client, send_request, forward_intermediate, request.agent_name,
+                ),
+                timeout=max(0.0, deadline - time.monotonic()),
+            )
+        except Exception as exc:
+            known_task_id = interaction.get("remote_task_id")
+            if not known_task_id or interaction.get("terminal"):
+                raise
+            if time.monotonic() >= deadline:
+                # Out of time: the interaction itself failed, so the caller keeps
+                # its existing contract of cancelling the remote task.
+                raise
+            logger.warning(
+                f"Response stream interrupted for agent={request.agent_name}, "
+                f"task_id={known_task_id}; the task may still be running, so "
+                f"falling back to polling every {self.task_poll_interval_seconds}s "
+                f"({type(exc).__name__}: {exc})"
+            )
+            return await self._await_remote_task(
+                request.agent_name, known_task_id, deadline,
+            )
+
+    async def _await_remote_task(
+        self, agent_name: str, remote_task_id: str, deadline: float,
+    ) -> SendMessageResult:
+        """Poll ``get_task`` until the task leaves SUBMITTED/WORKING or time runs out."""
+        interval = self.task_poll_interval_seconds
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(
+                    "Task interaction timed out while polling a remote task whose "
+                    "response stream was interrupted"
+                )
+            result = await asyncio.wait_for(
+                self._transport.get_task(agent_name, remote_task_id),
+                timeout=remaining,
+            )
+            if result.task_state not in {"TASK_STATE_SUBMITTED", "TASK_STATE_WORKING"}:
+                return result
+            await asyncio.sleep(min(interval, max(0.0, deadline - time.monotonic())))
 
     @staticmethod
     def _validate_remote_identity(
@@ -394,12 +503,30 @@ class WorkflowEngineClient:
             yield artifact.metadata
 
     @classmethod
-    def _negotiation_response(cls, result: SendMessageResult) -> ReceivedMessage:
+    def _negotiation_candidate(cls, result: SendMessageResult) -> Optional[ReceivedMessage]:
+        """Return the message carrying Negotiation-T metadata, or ``None`` if there is none.
+
+        A2A-T allows a Propose to ride on a **taskless bare message** -- the remote
+        negotiates before creating any task. ``None`` means "no negotiation
+        metadata at all", so the message is an ordinary answer. A message that does
+        carry the Negotiation-T URI but holds a malformed context is rejected by
+        :meth:`_negotiation_context`, so invalid negotiation metadata fails loudly
+        instead of being silently mistaken for a business result.
+        """
         uri = A2ATExtension.NEGOTIATION_T.uri
         for received in result.received_messages:
             if any(uri in metadata for metadata in cls._metadata_views(received)):
                 return received
-        raise ValueError("Unsupported INPUT_REQUIRED interaction: no Negotiation-T proposal")
+        return None
+
+    @classmethod
+    def _negotiation_response(cls, result: SendMessageResult) -> ReceivedMessage:
+        received = cls._negotiation_candidate(result)
+        if received is None:
+            raise ValueError(
+                "Unsupported INPUT_REQUIRED interaction: no Negotiation-T proposal"
+            )
+        return received
 
     @classmethod
     def _negotiation_context(cls, received: ReceivedMessage) -> NegotiationContext:

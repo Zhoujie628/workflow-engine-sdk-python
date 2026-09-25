@@ -1,4 +1,4 @@
-﻿# Copyright (c) 2026 Huawei Technologies Co., Ltd.
+# Copyright (c) 2026 Huawei Technologies Co., Ltd.
 # All Rights Reserved.
 #
 # SPDX-License-Identifier: Apache-2.0
@@ -31,6 +31,7 @@ import httpx
 from loguru import logger
 
 from workflow_engine.client.credential_crypto import decrypt_if_needed
+from workflow_engine.client.protocol_logger import register_sensitive_header
 
 
 def _safe_url(value: str) -> str:
@@ -323,6 +324,9 @@ class CustomAuthInterceptor(ClientCallInterceptor if _A2A_AVAILABLE else object)
                 if name in candidate and candidate[name] != value:
                     failure = f"conflicting values for header {name}"
                     break
+                # `name` is configurable, so the logger cannot recognize it by
+                # pattern; declare it explicitly before it can reach a log line.
+                register_sensitive_header(name)
                 candidate[name] = value
                 accept_header = scheme_cfg.get("accept_header")
                 if accept_header:

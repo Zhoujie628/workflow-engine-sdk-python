@@ -322,6 +322,9 @@ class _NegotiationTransport:
     def create_a2a_client(self, card):
         return object()
 
+    def client_for(self, agent_name):
+        return self.create_a2a_client(self.get_card(agent_name))
+
     def validate_content_extensions(self, card, content):
         return None
 
@@ -537,7 +540,7 @@ async def test_authorization_waits_for_terminal_result():
         def get_card(self, agent_name):
             return SimpleNamespace(name=agent_name)
 
-        def _get_extensions(self, card):
+        def get_extension_uris(self, card):
             del card
             return {A2ATExtension.AUTHORIZATION_T.uri}
 
@@ -546,6 +549,9 @@ async def test_authorization_waits_for_terminal_result():
 
         def create_a2a_client(self, card):
             return card
+
+        def client_for(self, agent_name):
+            return self.create_a2a_client(self.get_card(agent_name))
 
         def build_send_request(self, content, context_id):
             del content

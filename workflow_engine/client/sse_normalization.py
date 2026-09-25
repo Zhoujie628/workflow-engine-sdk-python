@@ -18,20 +18,28 @@
 """SSE response normalization for non-standard agent responses.
 
 Some A2A agents return bare Task or Message objects instead of properly
-wrapped StreamResponse envelopes.  This module patches google.protobuf
-json_format.Parse/ParseDict to coerce such responses into the expected
-StreamResponse shape, mirroring the orchestration center's exec_engine.
+wrapped StreamResponse envelopes.  This module patches
+``google.protobuf.json_format.ParseDict`` to coerce such responses into the
+expected StreamResponse shape, mirroring the orchestration center's
+exec_engine.
+
+Only ``ParseDict`` is patched.  ``json_format.Parse`` resolves ``ParseDict``
+from its module globals at call time, so normalizing the dict entry point
+already covers the text entry point -- and patching ``Parse`` as well would
+override a caller's explicit ``ignore_unknown_fields`` argument instead of
+honouring it.
 
 Import this module once at startup; the patch is process-global.
 """
 
 import json as _json
 import google.protobuf.json_format as _json_format
+from loguru import logger
 
 _STREAM_RESPONSE_KEYS = frozenset({"task", "message", "statusUpdate", "artifactUpdate"})
 
-_original_parse = _json_format.Parse
 _original_parse_dict = _json_format.ParseDict
+_APPLIED = False
 
 
 def _normalize_stream_response(data: dict) -> dict:
@@ -47,44 +55,31 @@ def _normalize_stream_response(data: dict) -> dict:
     return data
 
 
-def _parse_with_unknown(text, message, ignore_unknown_fields=False, **kwargs):
-    from a2a.types.a2a_pb2 import StreamResponse
-    is_stream = isinstance(message, StreamResponse)
-    if is_stream:
-        try:
-            data = _json.loads(text)
-            if isinstance(data, dict):
-                if not _STREAM_RESPONSE_KEYS.intersection(data):
-                    logger = __import__("loguru").logger
-                    logger.warning(
-                        f"[A2A] Non-SSE response from server: body_chars={len(text)}"
-                    )
-                    logger.trace(f"[A2A] Non-SSE response body: {text[:2048]}")
-                data = _normalize_stream_response(data)
-                text = _json.dumps(data)
-        except Exception:
-            pass
-        kwargs["ignore_unknown_fields"] = True
-    return _original_parse(text, message, ignore_unknown_fields=ignore_unknown_fields, **kwargs)
+def _parse_dict_with_unknown(js, message, ignore_unknown_fields=False, *args, **kwargs):
+    """Normalize a bare Task/Message payload before delegating to ParseDict.
 
-
-def _parse_dict_with_unknown(js, message, *args, **kwargs):
+    Non-``StreamResponse`` targets keep the caller's exact behaviour.  A
+    ``StreamResponse`` target always parses with ``ignore_unknown_fields=True``:
+    the payload has already been recognized as non-standard, and a newer agent
+    adding a field must not turn a working stream into a hard failure.
+    """
     from a2a.types.a2a_pb2 import StreamResponse
-    is_stream = isinstance(message, StreamResponse)
-    if is_stream and isinstance(js, dict):
+    if not isinstance(message, StreamResponse):
+        return _original_parse_dict(js, message, ignore_unknown_fields, *args, **kwargs)
+    if isinstance(js, dict):
+        if not _STREAM_RESPONSE_KEYS.intersection(js):
+            logger.warning(
+                f"[A2A] Non-SSE response from server: keys={sorted(js)[:8]}"
+            )
+            logger.trace(f"[A2A] Non-SSE response body: {str(js)[:2048]}")
         js = _normalize_stream_response(js)
-    if not is_stream:
-        return _original_parse_dict(js, message, *args, **kwargs)
-    kwargs.pop("ignore_unknown_fields", None)
-    args = list(args)
-    if args:
-        args[0] = True
-    else:
-        kwargs["ignore_unknown_fields"] = True
-    return _original_parse_dict(js, message, *args, **kwargs)
+    return _original_parse_dict(js, message, True, *args, **kwargs)
 
 
 def apply_sse_normalization():
-    """Apply the global Parse/ParseDict patches (idempotent)."""
-    _json_format.Parse = _parse_with_unknown
+    """Apply the global ``ParseDict`` patch (idempotent)."""
+    global _APPLIED
+    if _APPLIED:
+        return
     _json_format.ParseDict = _parse_dict_with_unknown
+    _APPLIED = True

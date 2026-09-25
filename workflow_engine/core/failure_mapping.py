@@ -31,7 +31,13 @@ def failure_to_task_result(error: BaseException) -> TaskResult:
         from a2a.utils.errors import A2AError, A2A_ERROR_MAPPING
 
         if isinstance(current, A2AError):
-            mapping = A2A_ERROR_MAPPING.get(type(current))
+            # Walk the MRO: the mapping is keyed by exact type, so a subclass
+            # raised by the SDK would otherwise fall through to the generic code.
+            mapping = None
+            for klass in type(current).__mro__:
+                mapping = A2A_ERROR_MAPPING.get(klass)
+                if mapping is not None:
+                    break
             reason = mapping.reason if mapping else ""
             code = f"a2a.{reason.lower()}" if reason else "a2a.remote_error"
             details = dict(getattr(current, "data", None) or {})

@@ -1,4 +1,4 @@
-﻿# Copyright (c) 2026 Huawei Technologies Co., Ltd.
+# Copyright (c) 2026 Huawei Technologies Co., Ltd.
 # All Rights Reserved.
 #
 # SPDX-License-Identifier: Apache-2.0
@@ -44,6 +44,7 @@ from workflow_engine.client.protocol_logger import log_response
 from workflow_engine.client.protocol_interceptor import ProtocolLoggingInterceptor
 from workflow_engine.client.sse_normalization import apply_sse_normalization
 from workflow_engine.client.agentcard_normalizer import normalize_agent_dict
+from workflow_engine.client.transport_activity import install_activity_hook
 from workflow_engine.control.control_points import EventType
 from workflow_engine.core.models import (
     A2AStreamEvent, MessageContent, ReceivedArtifact, ReceivedMessage,
@@ -78,18 +79,35 @@ class A2ATransport:
         auth_provider: Optional[AuthProvider] = None,
         preferred_protocol: Optional[str] = None,
         send_timeout_seconds: int = 600,
+        task_poll_interval_seconds: float = 20.0,
+        notification_ack_timeout_seconds: float = 300.0,
     ):
         if send_timeout_seconds <= 0:
             raise ValueError("send_timeout_seconds must be positive")
+        if task_poll_interval_seconds < 0.1:
+            # Mirrors the Java engine's 100ms floor for taskPollIntervalMillis.
+            raise ValueError("task_poll_interval_seconds must be at least 0.1")
+        if notification_ack_timeout_seconds <= 0:
+            raise ValueError("notification_ack_timeout_seconds must be positive")
+        self._task_poll_interval_seconds = float(task_poll_interval_seconds)
+        self._notification_ack_timeout_seconds = float(
+            notification_ack_timeout_seconds
+        )
         normalized_cards = self._normalize_cards(agent_cards)
         self._card_map = self._build_card_map(normalized_cards)
         self._send_timeout_seconds = send_timeout_seconds
         self._owns_httpx_client = httpx_client is None
         self._closed = False
+        self._a2a_clients: Dict[str, Any] = {}
         self._httpx_client = httpx_client or self._create_httpx_client(
             ssl_verify, ca_certs_path, client_cert_path, client_key_path,
             client_key_password, crl_path,
         )
+        # Observe body-chunk arrival so a long-lived notification stream can tell
+        # "quiet but alive" (SSE heartbeats) apart from "dead". The hook is a
+        # no-op unless a listener is bound for the call, so it is safe to install
+        # on a caller-provided client as well.
+        install_activity_hook(self._httpx_client)
         self._auth_manager = AuthManager(normalized_cards, credentials_config)
         self._auth_manager.set_httpx_client(self._httpx_client)
         self._context_id = str(uuid.uuid4())
@@ -98,7 +116,8 @@ class A2ATransport:
         logger.info(
             f"[Transport] Initialized with {len(self._card_map)} agent(s), "
             f"ssl_verify={ssl_verify}, "
-            f"send_timeout={send_timeout_seconds}s"
+            f"send_timeout={send_timeout_seconds}s, "
+            f"task_poll_interval={self._task_poll_interval_seconds}s"
         )
 
     # ------------------------------------------------------------------
@@ -195,6 +214,24 @@ class A2ATransport:
     def send_timeout_seconds(self) -> int:
         return self._send_timeout_seconds
 
+    @property
+    def task_poll_interval_seconds(self) -> float:
+        """Fallback poll interval used only after a response stream is interrupted.
+
+        While the SSE stream is alive this interval is unused; it exists so a task
+        that is still running on the remote side is not abandoned (or cancelled)
+        merely because an intermediary dropped the connection.
+        """
+        return self._task_poll_interval_seconds
+
+    @property
+    def notification_ack_timeout_seconds(self) -> float:
+        """How long to wait for the first Notification-T acknowledgement.
+
+        Governs only the initial ACK; it does not bound SSE idleness afterwards.
+        """
+        return self._notification_ack_timeout_seconds
+
     def get_card(self, agent_name: str):
         return self._card_map.get(agent_name)
 
@@ -202,6 +239,9 @@ class A2ATransport:
         normalized_cards = self._normalize_cards(agent_cards)
         self._card_map = self._build_card_map(normalized_cards)
         self._auth_manager.update_agent_cards(normalized_cards)
+        # Cached clients captured the previous cards, protocol bindings and
+        # interceptor set, so they must not outlive the update.
+        self._a2a_clients.clear()
 
     @staticmethod
     def validate_content_extensions(agent_card, content: MessageContent) -> None:
@@ -315,7 +355,13 @@ class A2ATransport:
         agent_name: str = "",
     ):
         """Reduce a response stream to its final task and structured evidence."""
-        response_text = None
+        # A ``task`` stream event carries a FULL task snapshot, so its artifact
+        # text must replace -- never accumulate -- or every update would append
+        # the same artifact text again. Standalone ``message`` events are
+        # genuinely incremental, so their text accumulates separately. The final
+        # text is assembled from the merged artifact map, which also covers
+        # streams that deliver content only through ``artifact_update`` events.
+        message_text = None
         last_task_result = None
         last_metadata_dict: Dict[str, Any] = {}
         task_state = ""
@@ -335,7 +381,6 @@ class A2ATransport:
                 state = self._extract_task_state(task)
                 logger.info(f"[Transport] Received StreamResponse with task: state={state or None}")
                 last_task_result = task
-                response_text = self._extract_task_text(task, response_text)
                 task_state = state or task_state
                 last_metadata_dict = self._merge_task_metadata(task, last_metadata_dict)
                 task_status_message = self._message_content(task.status.message)
@@ -350,9 +395,15 @@ class A2ATransport:
                     )
                     on_intermediate(EventType.AGENT_STATUS_UPDATE, {
                         "agent": agent_name,
+                        # Carried so a caller can remember the remote task identity
+                        # before the stream ends: if an intermediary drops the
+                        # connection mid-flight, the task can still be polled
+                        # instead of being abandoned or cancelled.
+                        "task_id": getattr(task, "id", "") or "",
                         "state": task_state,
                         "is_final": is_final,
-                        "text": response_text or "",
+                        "text": self._text_from_artifacts(task_artifacts)
+                        or message_text or "",
                         "metadata": dict(last_metadata_dict) if last_metadata_dict else {},
                     })
                     # Emit artifact update events for each artifact in the task
@@ -384,7 +435,7 @@ class A2ATransport:
                 logger.info("[Transport] Received StreamResponse with message")
                 msg = response.message
                 msg_text = self._extract_message_text(msg, None)
-                response_text = self._extract_message_text(msg, response_text)
+                message_text = self._extract_message_text(msg, message_text)
                 standalone_messages[msg.message_id] = ReceivedMessage(
                     message=self._message_content(msg)
                 )
@@ -462,7 +513,7 @@ class A2ATransport:
             task_state, task_status_message,
         )
         return SendMessageResult(
-            text=response_text or "",
+            text=self._text_from_artifacts(task_artifacts) or message_text or "",
             task=last_task_result,
             metadata=last_metadata_dict,
             task_state=task_state,
@@ -622,6 +673,21 @@ class A2ATransport:
         return current_text
 
     @staticmethod
+    def _text_from_artifacts(task_artifacts) -> Optional[str]:
+        """Concatenate the text of a merged artifact map in first-seen order.
+
+        Reading the merged map instead of one event's payload keeps snapshot and
+        ``artifact_update`` streams on the same code path, so an agent that only
+        streams artifacts still produces response text.
+        """
+        text: Optional[str] = None
+        for artifact in task_artifacts.values():
+            for part in artifact.parts or ():
+                if getattr(part, "text", ""):
+                    text = (text or "") + part.text
+        return text
+
+    @staticmethod
     def _extract_task_state(task) -> str:
         if not (task.status and task.status.state):
             return ""
@@ -664,15 +730,6 @@ class A2ATransport:
         return MessageToDict(md, preserving_proto_field_name=True)
 
     @staticmethod
-    def _text_from_metadata(metadata: Dict[str, Any]) -> Optional[str]:
-        if not isinstance(metadata, dict):
-            return None
-        for val in metadata.values():
-            if isinstance(val, str) and len(val) > 20:
-                return val
-        return None
-
-    @staticmethod
     def _extract_message_text(message, current_text: Optional[str]) -> Optional[str]:
         if not message.parts:
             return current_text
@@ -682,7 +739,12 @@ class A2ATransport:
         return current_text
 
     @staticmethod
-    def _get_extensions(agent_card) -> List[str]:
+    def get_extension_uris(agent_card) -> List[str]:
+        """Return the extension URIs an AgentCard advertises.
+
+        Public because the extension facades must validate against exactly the
+        same set the transport enforces for required extensions.
+        """
         uris = []
         exts = getattr(
             getattr(agent_card, "capabilities", None), "extensions", None
@@ -693,11 +755,28 @@ class A2ATransport:
                 uris.append(uri)
         return uris
 
-    def _client_for(self, agent_name: str):
+    # Backwards-compatible alias; prefer the public get_extension_uris().
+    _get_extensions = get_extension_uris
+
+    def client_for(self, agent_name: str):
+        """Return the A2A client for an agent, building it once and caching it.
+
+        Client construction resolves protocol bindings, the interceptor chain and
+        authentication state, so rebuilding it for every send, task poll or
+        cancellation repeated that work on each call. The cache is dropped by
+        :meth:`update_agent_cards`.
+        """
         card = self.get_card(agent_name)
         if card is None:
             raise RuntimeError(f"Agent not found: {agent_name}")
-        return self.create_a2a_client(card)
+        client = self._a2a_clients.get(agent_name)
+        if client is None:
+            client = self.create_a2a_client(card)
+            self._a2a_clients[agent_name] = client
+        return client
+
+    def _client_for(self, agent_name: str):
+        return self.client_for(agent_name)
 
     @classmethod
     def _result_from_task(cls, task) -> SendMessageResult:
@@ -743,32 +822,87 @@ class A2ATransport:
         event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> SendMessageResult:
         client = self._client_for(agent_name)
-        response_text = None
         task = None
         metadata: Dict[str, Any] = {}
         state = ""
-        received: list[ReceivedMessage] = []
+        message_text = None
+        standalone: list[ReceivedMessage] = []
+        task_artifacts: Dict[str, ReceivedArtifact] = {}
+        task_status_message = None
         async for response in client.subscribe(SubscribeToTaskRequest(id=task_id)):
             self.log_response_event(agent_name, response)
             if response.HasField("task"):
+                # Full task snapshot: rebuild rather than append, exactly as
+                # consume_stream does. The previous implementation replaced the
+                # whole `received` list here, silently dropping every standalone
+                # message observed before this event.
                 task = response.task
                 state = self._extract_task_state(task)
-                response_text = self._extract_task_text(task, response_text)
                 metadata = self._merge_task_metadata(task, metadata)
-                received = [self._result_from_task(task).received_messages[0]]
+                task_status_message = self._message_content(task.status.message)
+                task_artifacts = {
+                    artifact.artifact_id: self._received_artifact(artifact)
+                    for artifact in task.artifacts
+                }
                 event = {"agent": agent_name, "type": "task", "state": state}
             elif response.HasField("message"):
                 message = response.message
-                response_text = self._extract_message_text(message, response_text)
-                received.append(ReceivedMessage(message=self._message_content(message)))
-                event = {"agent": agent_name, "type": "message", "text": response_text or ""}
+                message_text = self._extract_message_text(message, message_text)
+                standalone.append(ReceivedMessage(message=self._message_content(message)))
+                event = {
+                    "agent": agent_name, "type": "message",
+                    "text": self._extract_message_text(message, None) or "",
+                }
+            elif response.HasField("status_update"):
+                update = response.status_update
+                state = (
+                    TaskState.Name(update.status.state)
+                    if update.status.state else state
+                )
+                task_status_message = self._message_content(update.status.message)
+                event = {"agent": agent_name, "type": "status", "state": state}
+            elif response.HasField("artifact_update"):
+                update = response.artifact_update
+                artifact = self._received_artifact(update.artifact)
+                previous = task_artifacts.get(artifact.artifact_id)
+                if getattr(update, "append", False) and previous is not None:
+                    artifact = ReceivedArtifact(
+                        artifact_id=artifact.artifact_id,
+                        name=artifact.name or previous.name,
+                        description=artifact.description or previous.description,
+                        parts=previous.parts + artifact.parts,
+                        metadata={**dict(previous.metadata), **dict(artifact.metadata)},
+                        extensions=artifact.extensions or previous.extensions,
+                    )
+                task_artifacts[artifact.artifact_id] = artifact
+                event = {
+                    "agent": agent_name, "type": "artifact",
+                    "artifact_id": artifact.artifact_id,
+                }
             else:
                 event = {"agent": agent_name, "type": "update"}
             if event_callback is not None:
                 event_callback(event)
+
+        received = list(standalone)
+        if task is not None or task_artifacts or task_status_message is not None:
+            received.append(ReceivedMessage(
+                message=task_status_message,
+                task_metadata=self._extract_task_metadata(task)
+                if task is not None else {},
+                artifacts=tuple(task_artifacts.values()),
+            ))
+        failure_code, failure_message = self._failure_from_state(
+            state, task_status_message,
+        )
         return SendMessageResult(
-            text=response_text or "", task=task, metadata=metadata,
-            task_state=state, received_messages=tuple(received),
+            text=self._text_from_artifacts(task_artifacts) or message_text or "",
+            task=task,
+            metadata=metadata,
+            task_state=state,
+            failure_code=failure_code,
+            failure_message=failure_message,
+            received_messages=tuple(received),
         )
 
     # ------------------------------------------------------------------

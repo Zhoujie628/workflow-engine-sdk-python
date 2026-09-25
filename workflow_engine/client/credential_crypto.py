@@ -26,6 +26,13 @@ Usage in credentials JSON::
     {"value": "enc:<base64-iv>:<base64-ciphertext>"}
 
 Plaintext values (no ``enc:`` prefix) are returned as-is for backward compat.
+
+Both entry points accept an optional ``aad`` (additional authenticated data)
+that binds a ciphertext to its context -- pass the agent and scheme it belongs
+to so a ciphertext cannot be replayed under a different identity. It defaults
+to ``None`` because the wire format is shared with the Java SDK's
+``CredentialCrypto``: enabling it on one side only would make every existing
+ciphertext undecryptable, so binding must be a coordinated cross-SDK change.
 """
 
 import os
@@ -47,10 +54,11 @@ def _resolve_key() -> Optional[str]:
     return None
 
 
-def decrypt_if_needed(value: Optional[str]) -> Optional[str]:
+def decrypt_if_needed(value: Optional[str], aad: Optional[str] = None) -> Optional[str]:
     """Decrypt a credential value if it has the ``enc:`` prefix.
 
     Values without the prefix are returned as-is (plaintext fallback).
+    ``aad`` must match the value used at encryption time.
     """
     if not value or not value.startswith(_PREFIX):
         return value
@@ -72,7 +80,9 @@ def decrypt_if_needed(value: Optional[str]) -> Optional[str]:
         ciphertext = ciphertext_and_tag[:-_TAG_LENGTH]
         tag = ciphertext_and_tag[-_TAG_LENGTH:]
         from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-        plaintext = AESGCM(key_bytes).decrypt(iv, ciphertext + tag, None)
+        plaintext = AESGCM(key_bytes).decrypt(
+            iv, ciphertext + tag, aad.encode("utf-8") if aad else None
+        )
         return plaintext.decode("utf-8")
     except Exception as e:
         if isinstance(e, (RuntimeError, ValueError)):
@@ -80,7 +90,7 @@ def decrypt_if_needed(value: Optional[str]) -> Optional[str]:
         raise RuntimeError("Credential decryption failed") from e
 
 
-def encrypt(plaintext: str) -> str:
+def encrypt(plaintext: str, aad: Optional[str] = None) -> str:
     """Encrypt a plaintext value using AES-GCM with the key from A2AT_CRED_KEY.
 
     Returns encrypted string in format ``enc:<base64-iv>:<base64-ciphertext>``.
@@ -92,7 +102,9 @@ def encrypt(plaintext: str) -> str:
     key_bytes = _decode_key(key_hex)
     iv = secrets.token_bytes(_IV_LENGTH)
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-    ciphertext_and_tag = AESGCM(key_bytes).encrypt(iv, plaintext.encode("utf-8"), None)
+    ciphertext_and_tag = AESGCM(key_bytes).encrypt(
+        iv, plaintext.encode("utf-8"), aad.encode("utf-8") if aad else None
+    )
     return (
         _PREFIX
         + base64.b64encode(iv).decode("ascii")

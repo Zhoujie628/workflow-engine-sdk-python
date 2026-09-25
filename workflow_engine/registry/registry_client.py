@@ -1,4 +1,4 @@
-﻿# Copyright (c) 2026 Huawei Technologies Co., Ltd.
+# Copyright (c) 2026 Huawei Technologies Co., Ltd.
 # All Rights Reserved.
 #
 # SPDX-License-Identifier: Apache-2.0
@@ -19,14 +19,39 @@
 
 Users can use this, or fetch AgentCards from any other source.
 The SDK does not depend on this module.
+
+TLS options mirror :class:`~workflow_engine.client.a2a_transport.A2ATransport`
+(``ssl_verify`` plus an optional custom CA, mTLS client identity and CRL). A
+boolean switch alone left a deployment behind a private CA with no option except
+disabling verification outright, so the registry helpers accept the same
+material the transport does.
 """
 
 import json
-from typing import List, Any
+from typing import Any, Dict, List, Optional
 from loguru import logger
 
 from workflow_engine.client.agentcard_normalizer import normalize_agent_dict
+from workflow_engine.client.ssl_context import create_ssl_context
 
+
+def _tls_options(
+    ssl_verify: bool = True,
+    ca_certs_path: Optional[str] = None,
+    client_cert_path: Optional[str] = None,
+    client_key_path: Optional[str] = None,
+    client_key_password: Optional[str] = None,
+    crl_path: Optional[str] = None,
+):
+    """Build the httpx ``verify`` argument, failing closed on bad TLS material."""
+    return create_ssl_context(
+        verify_server=ssl_verify,
+        ca_certs_path=ca_certs_path,
+        cert_path=client_cert_path,
+        key_path=client_key_path,
+        key_password=client_key_password,
+        crl_path=crl_path,
+    )
 
 
 async def load_psop(
@@ -34,6 +59,11 @@ async def load_psop(
     psop_id: str,
     access_token: str = None,
     ssl_verify: bool = True,
+    ca_certs_path: Optional[str] = None,
+    client_cert_path: Optional[str] = None,
+    client_key_path: Optional[str] = None,
+    client_key_password: Optional[str] = None,
+    crl_path: Optional[str] = None,
 ) -> "Workflow":
     """Fetch a PSOP from the orchestration center external API.
 
@@ -46,7 +76,13 @@ async def load_psop(
     url = f"{base_url}/api/v1/orchestrate/psop/{psop_id}"
     headers = {"Authorization": f"Bearer {access_token}"} if access_token else {}
     logger.info(f"[Registry] Loading PSOP from {url} (ssl_verify={ssl_verify})")
-    async with httpx.AsyncClient(verify=ssl_verify, timeout=30, follow_redirects=False) as client:
+    async with httpx.AsyncClient(
+        verify=_tls_options(
+            ssl_verify, ca_certs_path, client_cert_path, client_key_path,
+            client_key_password, crl_path,
+        ),
+        timeout=30, follow_redirects=False,
+    ) as client:
         resp = await client.get(url, headers=headers)
         resp.raise_for_status()
         data = resp.json()
@@ -61,6 +97,11 @@ async def search_psop(
     top_n: int = 5,
     access_token: str = None,
     ssl_verify: bool = True,
+    ca_certs_path: Optional[str] = None,
+    client_cert_path: Optional[str] = None,
+    client_key_path: Optional[str] = None,
+    client_key_password: Optional[str] = None,
+    crl_path: Optional[str] = None,
 ) -> List["WorkflowSearchResult"]:
     """Search for matching PSOP workflows from the orchestration center.
 
@@ -77,7 +118,13 @@ async def search_psop(
     body = {"intent": intent, "top_n": top_n}
     logger.info(f"[Registry] Searching PSOP at {url} (intent_chars={len(intent)}, top_n={top_n})")
     logger.trace(f"[Registry] Search intent={intent}")
-    async with httpx.AsyncClient(verify=ssl_verify, timeout=30, follow_redirects=False) as client:
+    async with httpx.AsyncClient(
+        verify=_tls_options(
+            ssl_verify, ca_certs_path, client_cert_path, client_key_path,
+            client_key_password, crl_path,
+        ),
+        timeout=30, follow_redirects=False,
+    ) as client:
         resp = await client.post(url, json=body, headers=headers)
         resp.raise_for_status()
         data = resp.json()
@@ -87,20 +134,49 @@ async def search_psop(
     return results
 
 
-
 class RegistryClient:
-    """Fetches AgentCards from the Registry Center."""
+    """Fetches AgentCards from the Registry Center.
 
-    def __init__(self, url: str, ssl_verify: bool = True):
+    ``access_token`` is attached to every request, so a registry with
+    authentication enabled is reachable through the same client the card
+    helpers use.
+    """
+
+    def __init__(
+        self,
+        url: str,
+        ssl_verify: bool = True,
+        access_token: Optional[str] = None,
+        ca_certs_path: Optional[str] = None,
+        client_cert_path: Optional[str] = None,
+        client_key_path: Optional[str] = None,
+        client_key_password: Optional[str] = None,
+        crl_path: Optional[str] = None,
+    ):
         self.url = url.rstrip("/")
         self.ssl_verify = ssl_verify
+        self.access_token = access_token
+        # Built once so a missing or invalid TLS file fails at construction
+        # rather than halfway through a fetch.
+        self._verify = _tls_options(
+            ssl_verify, ca_certs_path, client_cert_path, client_key_path,
+            client_key_password, crl_path,
+        )
+
+    def _headers(self) -> Dict[str, str]:
+        if not self.access_token:
+            return {}
+        return {"Authorization": f"Bearer {self.access_token}"}
 
     async def fetch_agent_cards(self) -> List[Any]:
         """Fetch all AgentCards. Returns protobuf objects if a2a-sdk available, else dicts."""
         import httpx
         logger.info(f"[Registry] Fetching all agent cards from {self.url}")
-        async with httpx.AsyncClient(verify=self.ssl_verify, timeout=30) as client:
-            resp = await client.get(f"{self.url}/rest/v1/registry-center/agent-cards")
+        async with httpx.AsyncClient(verify=self._verify, timeout=30) as client:
+            resp = await client.get(
+                f"{self.url}/rest/v1/registry-center/agent-cards",
+                headers=self._headers(),
+            )
             resp.raise_for_status()
             data = resp.json()
             raw_cards = data.get("agentCards", data.get("data", []))
@@ -121,8 +197,12 @@ class RegistryClient:
         params = {"name": name}
         if organization:
             params["organization"] = organization
-        async with httpx.AsyncClient(verify=self.ssl_verify, timeout=30) as client:
-            resp = await client.get(f"{self.url}/rest/v1/registry-center/agent-cards", params=params)
+        async with httpx.AsyncClient(verify=self._verify, timeout=30) as client:
+            resp = await client.get(
+                f"{self.url}/rest/v1/registry-center/agent-cards",
+                params=params,
+                headers=self._headers(),
+            )
             resp.raise_for_status()
             data = resp.json()
             cards = data.get("agentCards", data.get("data", []))
@@ -153,8 +233,8 @@ class RegistryClient:
         url = f"{self.url}/rest/v1/registry-center/agent-cards"
         payload = {"agentCards": [card_payload]}
         logger.info(f"[Registry] Registering agent card: name={card_payload.get('name', '?')}")
-        async with httpx.AsyncClient(verify=self.ssl_verify, timeout=30) as client:
-            resp = await client.post(url, json=payload)
+        async with httpx.AsyncClient(verify=self._verify, timeout=30) as client:
+            resp = await client.post(url, json=payload, headers=self._headers())
             resp.raise_for_status()
             result = resp.json()
         logger.info(f"[Registry] Agent card registered: name={card_payload.get('name', '?')}")

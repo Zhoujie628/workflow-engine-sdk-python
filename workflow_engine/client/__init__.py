@@ -1,4 +1,4 @@
-﻿# Copyright (c) 2026 Huawei Technologies Co., Ltd.
+# Copyright (c) 2026 Huawei Technologies Co., Ltd.
 # All Rights Reserved.
 #
 # SPDX-License-Identifier: Apache-2.0
@@ -33,7 +33,9 @@ from workflow_engine.client.auth_manager import AuthProviderInterceptor
 from workflow_engine.client.extension_interceptor import ExtensionInterceptor
 from workflow_engine.client.agentcard_normalizer import normalize_agent_dict
 
-from workflow_engine.client.protocol_logger import log_request, log_response
+from workflow_engine.client.protocol_logger import (
+    log_request, log_response, register_sensitive_header,
+)
 from workflow_engine.client.stub_engine_client import StubWorkflowEngineClient
 
 __all__ = [
@@ -43,5 +45,5 @@ __all__ = [
     "CustomAuthInterceptor", "ExtensionInterceptor", "normalize_agent_dict",
     "A2ATExtension", "A2atMessages", "encrypt", "decrypt_if_needed", "load_to_environ",
     "AuthProvider", "AuthProviderInterceptor",
-    "log_request", "log_response", "StubWorkflowEngineClient",
+    "log_request", "log_response", "register_sensitive_header", "StubWorkflowEngineClient",
 ]

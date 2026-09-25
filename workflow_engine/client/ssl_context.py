@@ -42,11 +42,40 @@ def create_ssl_context(
         crl_path: Path to CRL file.
 
     Returns:
-        ssl.SSLContext if verification enabled, False otherwise.
+        ssl.SSLContext if verification is enabled, or if verification is
+        disabled but a client identity must still be presented; ``False`` only
+        when verification is disabled and no client identity was supplied.
     """
     if not verify_server:
-        logger.warning("Outbound TLS verification disabled. Insecure for production.")
-        return False
+        # A caller that disabled server verification may still need to present a
+        # client identity. Returning plain False silently discarded the mTLS
+        # material, so build an unverified context that keeps it instead.
+        if ca_certs_path or crl_path:
+            raise ValueError(
+                "ca_certs_path/crl_path require verify_server=True: a trust store "
+                "or CRL cannot be enforced while server verification is disabled"
+            )
+        if not (cert_path or key_path):
+            logger.warning("Outbound TLS verification disabled. Insecure for production.")
+            return False
+        if bool(cert_path) != bool(key_path):
+            raise ValueError("Both client certificate and private key are required for mTLS")
+        if not os.path.isfile(cert_path) or not os.path.isfile(key_path):
+            raise FileNotFoundError("Client certificate or private key not found")
+        # check_hostname must be cleared before verify_mode, or the stdlib raises.
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        ctx.load_cert_chain(
+            certfile=cert_path,
+            keyfile=key_path,
+            password=key_password if key_password else None,
+        )
+        logger.warning(
+            "Outbound TLS verification disabled but a client identity (mTLS) is "
+            "still presented. Insecure for production."
+        )
+        return ctx
 
     ctx = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)
 
