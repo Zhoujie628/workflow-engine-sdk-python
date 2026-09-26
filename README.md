@@ -80,20 +80,31 @@ await transport.close()
 
 ## 独立协议操作
 
-Authorization-T 和 Notification-T 不属于工作流因果链，应使用独立 `A2ATransport` 和 `ExtensionSender`：
+Authorization-T 和 Notification-T 不属于工作流因果链。工作流任务、一次性授权和长订阅应分别持有 `A2ATransport`；协议处理能力可以共用，但 HTTP 通道和生命周期不能共用：
 
 ```python
-sender = ExtensionSender(independent_transport)
-authorization = await sender.send_authorization(agent_name, authorization_content)
+auth_transport = A2ATransport(agent_cards)
+notification_transport = A2ATransport(agent_cards)
+try:
+    authorization = await ExtensionSender(auth_transport).send_authorization(
+        agent_name, authorization_content,
+    )
+finally:
+    await auth_transport.close()  # 授权操作结束即释放，不影响订阅
 
-subscription = sender.open_notification(agent_name, notification_content, on_notification)
-ack = await subscription.acknowledgement
-# 收到业务结果后由集成方显式关闭：
-subscription.close()
-await subscription.completion
+subscription = ExtensionSender(notification_transport).open_notification(
+    agent_name, notification_content, on_notification,
+)
+try:
+    ack = await subscription.acknowledgement  # 仅表示订阅已接受，流继续保持
+    # 收到目标业务结果后由 on_notification 显式关闭，或在停机时关闭。
+    await subscription.completion
+finally:
+    subscription.close()
+    await notification_transport.close()
 ```
 
-授权或订阅失败不会自动阻断后续工作流。`send_authorization` 会等待授权任务到达终态，集成方通过 `is_success` 判断结果；订阅确认通过 `is_failure` 排除失败、拒绝或取消。订阅确认与长连接结束是两个不同 Future；`heartbeat` 和 `is_healthy()` 可用于本地存活性判断。
+授权或订阅失败不会自动阻断后续工作流。`send_authorization` 会等待授权任务到达终态，集成方通过 `is_success` 判断结果；订阅拒绝会让 `acknowledgement` 抛错，普通消息和 artifact 不算 ACK。订阅确认与长连接结束是两个不同 Future；业务任务终态不会自动关闭独立订阅，持续到达的 SSE 心跳可保持长连接存活。显式关闭、远端 EOF、空闲超时或传输异常会结束流。`heartbeat` 和 `is_healthy()` 可用于本地存活性判断。
 
 ## 远端任务管理
 

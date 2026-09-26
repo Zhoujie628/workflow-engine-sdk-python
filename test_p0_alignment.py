@@ -466,17 +466,16 @@ class _ImmediateAckClient:
         from a2a.types.a2a_pb2 import StreamResponse
 
         response = StreamResponse()
-        response.message.message_id = "m1"
-        response.message.context_id = "ctx"
-        response.message.role = 1
-        response.message.parts.add().text = "ack"
+        from a2a.types.a2a_pb2 import TaskState
+        response.status_update.task_id = "task-1"
+        response.status_update.status.state = TaskState.TASK_STATE_WORKING
         yield response
         await asyncio.sleep(3600)
 
 
 def _notification_transport(client, **kwargs) -> A2ATransport:
     transport = A2ATransport(agent_cards=[_notification_card()], **kwargs)
-    transport.client_for = lambda agent_name: client
+    transport.create_a2a_client = lambda card: client
     return transport
 
 

@@ -243,16 +243,21 @@ from a2a_t.core.standard_templates import (
 )
 
 auth_transport = A2ATransport(agent_cards, auth_provider=provider)
-sender = ExtensionSender(auth_transport)
+notification_transport = A2ATransport(agent_cards, auth_provider=provider)
+auth_sender = ExtensionSender(auth_transport)
+notification_sender = ExtensionSender(notification_transport)
 
 generated_auth = a2at_client.generate_auth_prompt_from_text(
     authorization_text,
     AUTHORIZATION_POLICY_MANAGEMENT_URI,
 )
 auth_content = A2atMessages.from_generated(generated_auth, [Part(text="authorize policy")])
-auth_result = await sender.send_authorization("domain-a", auth_content)
-if not auth_result.is_success:
-    record_independent_failure(auth_result.failure_code, auth_result.failure_message)
+try:
+    auth_result = await auth_sender.send_authorization("domain-a", auth_content)
+    if not auth_result.is_success:
+        record_independent_failure(auth_result.failure_code, auth_result.failure_message)
+finally:
+    await auth_transport.close()  # The one-shot channel is no longer needed.
 ```
 
 Notification uses a long-lived handle:
@@ -271,15 +276,18 @@ notification_content = A2atMessages.from_generated(
     generated_notification,
     [Part(text="subscribe to business event")],
 )
-subscription = sender.open_notification("domain-a", notification_content, on_notification)
-ack = await subscription.acknowledgement
-if ack.is_failure:
+subscription = notification_sender.open_notification(
+    "domain-a", notification_content, on_notification,
+)
+try:
+    await subscription.acknowledgement  # A state-bearing ACK; stream remains open.
+    await subscription.completion  # Ends on explicit close, EOF, idle timeout or error.
+finally:
     subscription.close()
-    record_independent_failure(ack.failure_code, ack.failure_message)
-await subscription.completion
+    await notification_transport.close()
 ```
 
-Use a transport instance separate from workflow task traffic. Host orchestration may log an independent-operation failure, but it must not make workflow execution depend on that result unless explicit business policy says so.
+Use three transport instances for workflow tasks, Authorization-T, and Notification-T. Authorization-T is one-shot; release its transport after the result. Notification-T keeps its own transport until the subscription ends. A message or artifact without task state is not an ACK, and a failure state rejects the subscription. Host orchestration may log an independent-operation failure, but it must not make workflow execution depend on that result unless explicit business policy says so.
 
 ## 7. Existing task operations
 

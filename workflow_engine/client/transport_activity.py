@@ -12,8 +12,9 @@ never reaches the protocol layer as a decoded event.
 
 The binding is a :class:`contextvars.ContextVar` rather than a ``ThreadLocal``
 because that is the asyncio equivalent: a task inherits its creator's context, so
-the response hook installed on the *shared* httpx client attributes activity to
-the call that opened the stream, without giving each subscription its own client.
+the response hook installed on the transport's httpx client attributes activity
+to the call that opened the stream. Each subscription has its own A2A client;
+separate Authorization-T and Notification-T transports own separate httpx clients.
 
 Why this matters: a notification stream that is merely quiet looks identical to a
 dead one if liveness is judged only from decoded events. Judging it from observed

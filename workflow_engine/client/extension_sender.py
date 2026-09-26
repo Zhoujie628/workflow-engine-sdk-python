@@ -11,6 +11,7 @@ import asyncio
 import inspect
 import time
 import uuid
+from contextlib import aclosing
 from dataclasses import dataclass
 from typing import Callable, Optional
 
@@ -51,16 +52,17 @@ class NotificationSubscription:
         self.acknowledgement: asyncio.Future[SendMessageResult] = loop.create_future()
         self.completion: asyncio.Future[None] = loop.create_future()
         self._opened_at = time.time()
-        # Opening the stream counts as activity, so a stream that never delivers
-        # a single chunk is still reapable. The Java engine initialises its
-        # lastActivityNanos the same way.
-        self._last_activity_at: Optional[float] = self._opened_at
+        # The idle deadline starts at opening, even if no bytes arrive. Public
+        # heartbeat activity remains unset until real transport activity,
+        # matching Java's separate lastActivityNanos and lastActivityAt values.
+        self._last_activity_at: Optional[float] = None
         self._last_activity_monotonic: Optional[float] = time.monotonic()
         self._last_business_event_at: Optional[float] = None
         self._event_count = 0
         self._task: Optional[asyncio.Task] = None
         self._ack_timer: Optional[asyncio.Task] = None
         self._idle_timer: Optional[asyncio.Task] = None
+        self._completion_error: Optional[Exception] = None
         self._closed = False
 
     @property
@@ -91,6 +93,7 @@ class NotificationSubscription:
             raise ValueError("maximum_idle_seconds must not be negative")
         return (
             self.is_active
+            and self._last_activity_at is not None
             and self._last_activity_monotonic is not None
             and time.monotonic() - self._last_activity_monotonic <= maximum_idle_seconds
         )
@@ -107,6 +110,25 @@ class NotificationSubscription:
 
     def _attach(self, task: asyncio.Task) -> None:
         self._task = task
+        task.add_done_callback(self._on_task_done)
+
+    def _on_task_done(self, task: asyncio.Task) -> None:
+        """Completion means the streaming task has exited, not merely close requested."""
+        self._closed = True
+        if not self.acknowledgement.done():
+            self.acknowledgement.set_exception(
+                RuntimeError("Notification-T stream ended before acknowledgement")
+            )
+        if not self.completion.done():
+            if self._completion_error is not None:
+                self.completion.set_exception(self._completion_error)
+            elif task.cancelled():
+                self.completion.set_result(None)
+            elif task.exception() is not None:
+                self.completion.set_exception(task.exception())
+            else:
+                self.completion.set_result(None)
+        self._cancel_timers()
 
     def _attach_ack_timer(self, timer: asyncio.Task) -> None:
         self._ack_timer = timer
@@ -114,28 +136,30 @@ class NotificationSubscription:
     def _attach_idle_timer(self, timer: asyncio.Task) -> None:
         self._idle_timer = timer
 
-    def close(self) -> None:
-        if self._closed:
-            return
-        self._closed = True
-        if self._task is not None and not self._task.done():
-            self._task.cancel()
+    def _cancel_timers(self) -> None:
         try:
             current = asyncio.current_task()
         except RuntimeError:
             current = None
-        # The ACK deadline and the idle reaper may each fire close() from inside
-        # their own task; never self-cancel, or the timeout path would raise out
-        # of the timer instead of completing it.
         for timer in (self._ack_timer, self._idle_timer):
             if timer is not None and timer is not current and not timer.done():
                 timer.cancel()
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            current = asyncio.current_task()
+        except RuntimeError:
+            current = None
+        if self._task is not None and self._task is not current and not self._task.done():
+            self._task.cancel()
+        self._cancel_timers()
         if not self.acknowledgement.done():
             self.acknowledgement.cancel(
                 "Notification-T subscription closed before acknowledgement"
             )
-        if not self.completion.done():
-            self.completion.set_result(None)
 
     async def __aenter__(self):
         return self
@@ -247,42 +271,62 @@ class ExtensionSender:
 
         async def consume() -> None:
             try:
-                client = self._transport.client_for(agent_name)
+                # A subscription owns its A2A client rather than using the
+                # transport's per-agent client shared with one-shot traffic.
+                client = self._transport.create_a2a_client(card)
                 request = self._transport.build_send_request(content, context_id)
                 # Bound for the whole stream, not just the call: the request is
                 # issued on the first iteration, and every body chunk the HTTP
                 # layer reads afterwards -- including an SSE comment heartbeat
                 # that never becomes a decoded event -- reports activity here.
                 with bind_activity_listener(subscription._record_activity):
-                    async for response in client.send_message(request):
-                        self._transport.log_response_event(agent_name, response)
-                        subscription._record_event()
-                        result, received = self._incremental_result(response)
-                        if not subscription.acknowledgement.done():
-                            subscription.acknowledgement.set_result(result)
-                        if received is not None:
-                            # Unbind while the host callback runs: any protocol
-                            # traffic it issues belongs to the host, not to this
-                            # subscription, and must not keep a dead stream alive.
-                            with bind_activity_listener(None):
-                                returned = listener(subscription, received)
-                                if inspect.isawaitable(returned):
-                                    await returned
+                    async with aclosing(client.send_message(request)) as stream:
+                        async for response in stream:
+                            self._transport.log_response_event(agent_name, response)
+                            subscription._record_event()
+                            result, received = self._incremental_result(response)
+                            state = result.task_state
+                            if state in {
+                                "TASK_STATE_FAILED", "TASK_STATE_CANCELED",
+                                "TASK_STATE_CANCELLED", "TASK_STATE_REJECTED",
+                            } and not subscription.acknowledgement.done():
+                                subscription.acknowledgement.set_exception(
+                                    RuntimeError(
+                                        f"Notification-T subscription rejected by {agent_name}: "
+                                        f"state={state}, response={result.text or ''}"
+                                    )
+                                )
+                                subscription.close()
+                                break
+                            if state and not subscription.acknowledgement.done():
+                                subscription.acknowledgement.set_result(result)
+                            if received is not None:
+                                # Unbind while the host callback runs: any protocol
+                                # traffic it issues belongs to the host, not to this
+                                # subscription, and must not keep a dead stream alive.
+                                with bind_activity_listener(None):
+                                    returned = listener(subscription, received)
+                                    if inspect.isawaitable(returned):
+                                        await returned
+                            # Business task states on this channel do not own
+                            # the subscription lifetime. Only an explicit
+                            # close, transport EOF/error or idle timeout ends it.
+                            if not subscription.is_active:
+                                break
             except asyncio.CancelledError:
-                if not subscription.completion.done():
-                    subscription.completion.set_result(None)
+                pass
             except Exception as exc:
                 if not subscription.acknowledgement.done():
                     subscription.acknowledgement.set_exception(exc)
-                if not subscription.completion.done():
-                    subscription.completion.set_exception(exc)
+                subscription._completion_error = exc
             else:
-                if not subscription.completion.done():
-                    subscription.completion.set_result(None)
+                if not subscription.acknowledgement.done():
+                    subscription.acknowledgement.set_exception(
+                        RuntimeError("Notification-T stream ended before acknowledgement")
+                    )
             finally:
                 subscription._closed = True
-                if not subscription.completion.done():
-                    subscription.completion.set_result(None)
+                subscription._cancel_timers()
 
         task = asyncio.create_task(consume(), name=f"notification-t-{agent_name}")
         subscription._attach(task)
@@ -315,6 +359,11 @@ class ExtensionSender:
         subscription._attach_ack_timer(asyncio.create_task(
             enforce_ack_deadline(), name=f"notification-t-ack-{agent_name}",
         ))
+        subscription.acknowledgement.add_done_callback(
+            lambda _: subscription._ack_timer.cancel()
+            if subscription._ack_timer is not None and not subscription._ack_timer.done()
+            else None
+        )
 
         idle_timeout = (
             self._notification_idle_timeout_seconds
@@ -338,11 +387,9 @@ class ExtensionSender:
                     continue
                 if time.monotonic() - last_activity < idle_timeout:
                     continue
-                subscription.completion.set_exception(
-                    TimeoutError(
-                        f"Notification-T stream for agent={agent_name} saw no "
-                        f"activity for {idle_timeout}s"
-                    )
+                subscription._completion_error = TimeoutError(
+                    f"Notification-T stream for agent={agent_name} saw no "
+                    f"activity for {idle_timeout}s"
                 )
                 logger.warning(
                     f"Notification-T subscription for agent={agent_name} saw no "

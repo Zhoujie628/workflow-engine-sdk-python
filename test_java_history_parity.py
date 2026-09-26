@@ -320,7 +320,7 @@ class _QuietAfterFirstEventClient:
 
 def _notification_transport(client) -> A2ATransport:
     transport = A2ATransport(agent_cards=[_notification_card()])
-    transport.client_for = lambda agent_name: client
+    transport.create_a2a_client = lambda card: client
     return transport
 
 

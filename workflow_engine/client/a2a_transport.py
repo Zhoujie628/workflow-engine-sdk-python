@@ -11,8 +11,8 @@ shared base over which the two single-responsibility facades sit:
 
 * ``WorkflowEngineClient`` (engine_client.py) -- workflow task dispatch,
   task waiting, Negotiation-T lifecycle, event callback, and control point.
-* ``ExtensionSender`` (extension_sender.py) -- one-shot pre-positioning
-  sends: Authorization-T / Notification-T.
+* ``ExtensionSender`` (extension_sender.py) -- one-shot Authorization-T sends
+  and long-lived Notification-T subscriptions.
 
 Neither facade duplicates transport code; both delegate here.
 """
