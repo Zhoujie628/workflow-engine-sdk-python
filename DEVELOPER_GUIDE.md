@@ -265,8 +265,7 @@ Notification uses a long-lived handle:
 ```python
 def on_notification(subscription, received):
     process(received)
-    if is_expected_final_result(received):
-        subscription.close()
+    # A single result does not end the subscription; later notifications may follow.
 
 generated_notification = a2at_client.generate_notification_prompt_from_text(
     subscription_text,
@@ -340,9 +339,15 @@ The provider owns token acquisition. The engine does not read provider-specific 
 
 ## 9. TLS and diagnostics
 
-Default TLS verifies the server with system trust. Optional parameters are `ca_certs_path`, `client_cert_path`, `client_key_path`, `client_key_password`, and `crl_path`. Missing or invalid configured files raise during construction.
+Default TLS verifies the server with system trust. Optional parameters are `ca_certs_path`, `client_cert_path`, `client_key_path`, `client_key_password`, and `crl_path`. Missing or invalid configured files raise during construction. Explicit TLS/mTLS/CRL options are rejected when the selected protocol cannot apply the HTTP client configuration; select an HTTP protocol or configure that transport's TLS independently. An explicitly preferred protocol absent from the AgentCard fails instead of falling back silently.
 
-Set `WORKFLOW_ENGINE_PROTOCOL_LOGGING=true` to log pretty-printed final A2A request/response objects. Sensitive headers stay redacted unless the separate sensitive-header flag is explicitly enabled. Protocol logs are diagnostic representations; transport internals may still prevent observation of exact wire bytes.
+For encrypted agent credentials, pass `credential_encryption_key=<64-hex-character key>` to `A2ATransport` so each host instance can receive its key from a secret manager. `A2AT_CRED_KEY` remains a fallback when no key is injected. Neither key is logged.
+
+Set `WORKFLOW_ENGINE_PROTOCOL_LOGGING=true` to log pretty-printed final A2A request/response objects. Credential-shaped values in bodies are always redacted. Sensitive headers stay redacted unless the separate sensitive-header flag is explicitly enabled. Protocol logs are diagnostic representations; transport internals may still prevent observation of exact wire bytes.
+
+Remote A2A failures use `a2a.<reason>` or `a2a.http.<status>` when no reason is present. `error_details` follows the Java SDK's `httpStatus`, `code`, `status`, `reason`, `domain`, `details`, and `retryAfter` names. A response stream with no protocol event fails as `a2a.empty_stream`.
+
+`RegistryClient`, `load_psop`, and `search_psop` accept `connect_timeout_seconds` and `read_timeout_seconds` (both default to 30 seconds). Both must be positive.
 
 ## 10. Workflow retrieval
 

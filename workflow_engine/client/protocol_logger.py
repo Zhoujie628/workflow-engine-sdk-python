@@ -28,6 +28,8 @@ from typing import Any, Dict, Optional
 
 from loguru import logger
 
+from workflow_engine.client.sensitive_data import redact
+
 
 # Substring patterns, matched against the separator-stripped lower-case name.
 _SENSITIVE_HEADER_PARTS = (
@@ -105,14 +107,14 @@ def log_request(
     header_text = "\n".join(header_lines) if header_lines else "  (none)"
     logger.debug(
         f">>> [{agent_name}] REQUEST to {endpoint}\n"
-        f"=== Headers ===\n{header_text}\n=== Body ===\n{body}"
+        f"=== Headers ===\n{header_text}\n=== Body ===\n{redact(body)}"
     )
 
 
 def log_response(agent_name: str, event_type: str, body: str) -> None:
     """Log an incoming A2A response event."""
     if _enabled():
-        logger.debug(f"<<< [{agent_name}] RESPONSE [{event_type}]\n{body}")
+        logger.debug(f"<<< [{agent_name}] RESPONSE [{event_type}]\n{redact(body)}")
 
 
 __all__ = ["log_request", "log_response", "register_sensitive_header"]

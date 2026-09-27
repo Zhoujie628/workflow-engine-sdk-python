@@ -67,11 +67,21 @@ def _parse_dict_with_unknown(js, message, ignore_unknown_fields=False, *args, **
     if not isinstance(message, StreamResponse):
         return _original_parse_dict(js, message, ignore_unknown_fields, *args, **kwargs)
     if isinstance(js, dict):
+        from workflow_engine.client.remote_error import from_payload
+
+        remote_error = from_payload(js)
+        if remote_error is not None:
+            raise remote_error
         if not _STREAM_RESPONSE_KEYS.intersection(js):
             logger.warning(
                 f"[A2A] Non-SSE response from server: keys={sorted(js)[:8]}"
             )
-            logger.trace(f"[A2A] Non-SSE response body: {str(js)[:2048]}")
+            from workflow_engine.client.sensitive_data import redact
+
+            logger.trace(
+                f"[A2A] Non-SSE response body: "
+                f"{redact(_json.dumps(js, ensure_ascii=False, default=str))[:2048]}"
+            )
         js = _normalize_stream_response(js)
     return _original_parse_dict(js, message, True, *args, **kwargs)
 

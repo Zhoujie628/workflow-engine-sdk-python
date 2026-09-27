@@ -198,8 +198,10 @@ async def execute_psop(
         except asyncio.CancelledError:
             holder["error"] = "Workflow cancelled (client disconnected)"
         except Exception as e:
-            logger.error(f"[execute_psop] Execution failed: {e}", exc_info=True)
-            holder["error"] = str(e)
+            from workflow_engine.client.sensitive_data import redact
+
+            logger.error(f"[execute_psop] Execution failed: {redact(str(e))}")
+            holder["error"] = redact(str(e))
         finally:
             if owns_client:
                 try:
@@ -228,7 +230,9 @@ async def execute_psop(
                 if hasattr(ret, "__await__"):
                     await ret
             except Exception as e:
-                logger.error(f"[execute_psop] on_finish failed: {e}", exc_info=True)
+                from workflow_engine.client.sensitive_data import redact
+
+                logger.error(f"[execute_psop] on_finish failed: {redact(str(e))}")
 
         emitter.emit("close", {})
         emitter.finish()

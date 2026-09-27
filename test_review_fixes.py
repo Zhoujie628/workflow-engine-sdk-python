@@ -30,6 +30,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from loguru import logger
 from a2a.client.interceptors import BeforeArgs
 from a2a.types import (
     AgentCapabilities,
@@ -398,6 +399,237 @@ def test_failure_mapping_walks_the_mro_for_a2a_error_subclasses():
     assert result.error_code == f"a2a.{expected.reason.lower()}"
     assert result.error_details["reason"] == expected.reason
     assert result.error_details["domain"] == "a2a-protocol.org"
+
+
+def test_protocol_logs_redact_credentials_in_request_and_response_bodies(monkeypatch):
+    from workflow_engine.client.protocol_logger import log_response
+
+    monkeypatch.setenv("WORKFLOW_ENGINE_PROTOCOL_LOGGING", "true")
+    messages = []
+    sink = logger.add(messages.append, format="{message}", level="DEBUG")
+    try:
+        log_request(
+            "agent", "https://example.com",
+            {"nested": {"access_token": "body-secret", "note": "safe"}},
+        )
+        log_response(
+            "agent", "Task", '{"password":"reply-secret","note":"safe"}',
+        )
+        log_response("agent", "Message", "Bearer opaque-token password=form-secret")
+    finally:
+        logger.remove(sink)
+    rendered = "".join(messages)
+    for secret in ("body-secret", "reply-secret", "opaque-token", "form-secret"):
+        assert secret not in rendered
+    assert "safe" in rendered
+    assert "***" in rendered
+
+
+def test_activated_extension_must_be_declared_by_agent_card():
+    content = MessageContent(
+        parts=MessageContent.text("task").parts,
+        extensions=frozenset({"urn:example:unknown"}),
+    )
+    with pytest.raises(ValueError, match="not declared"):
+        A2ATransport.validate_content_extensions(_card(), content)
+
+
+def test_message_content_with_extension_returns_independent_snapshot():
+    original = MessageContent.text("task")
+    activated = original.with_extension("urn:example:task")
+    assert original.extensions == frozenset()
+    assert activated.extensions == frozenset({"urn:example:task"})
+    assert activated.with_extension("urn:example:task").extensions == activated.extensions
+    with pytest.raises(ValueError, match="Extension URI"):
+        original.with_extension(" ")
+
+
+def test_registry_and_psop_http_timeouts_are_configurable():
+    from workflow_engine.registry.registry_client import RegistryClient, _http_timeout
+
+    timeout = _http_timeout(2.5, 45.0)
+    assert timeout.connect == 2.5
+    assert timeout.read == 45.0
+    assert RegistryClient(
+        "https://registry.example", connect_timeout_seconds=2.5,
+        read_timeout_seconds=45.0,
+    )._timeout == timeout
+    with pytest.raises(ValueError, match="timeouts must be positive"):
+        _http_timeout(0, 30)
+
+
+@pytest.mark.parametrize("options", [
+    {"crl_path": "unused.crl"},
+    {"client_cert_path": "unused.crt", "client_key_path": "unused.key"},
+    {"ca_certs_path": "unused-ca.crt"},
+])
+@pytest.mark.asyncio
+async def test_explicit_tls_options_reject_unsupported_grpc_transport(options):
+    import httpx
+
+    card = _card()
+    card.supported_interfaces[0].protocol_binding = "GRPC"
+    async with httpx.AsyncClient() as client:
+        transport = A2ATransport([card], httpx_client=client, **options)
+        try:
+            with pytest.raises(ValueError, match="cannot be applied to GRPC"):
+                transport.create_a2a_client(card)
+        finally:
+            await transport.close()
+
+
+@pytest.mark.asyncio
+async def test_explicit_preferred_protocol_does_not_silently_fall_back():
+    transport = A2ATransport([_card()], preferred_protocol="GRPC")
+    try:
+        with pytest.raises(ValueError, match="not declared"):
+            transport.create_a2a_client(transport.get_card("agent"))
+    finally:
+        await transport.close()
+
+
+def test_standard_remote_error_envelope_matches_java_error_contract():
+    from workflow_engine.client.remote_error import from_payload
+
+    remote = from_payload({
+        "error": {
+            "code": 403,
+            "message": "Bearer raw-secret is denied",
+            "status": "PERMISSION_DENIED",
+            "details": [{
+                "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+                "reason": "AUTHORIZATION_DENIED",
+                "domain": "a2a-protocol.org",
+                "metadata": {"access_token": "nested-secret"},
+            }],
+        },
+    }, retry_after="30")
+    assert remote is not None
+    result = failure_to_task_result(remote)
+    assert result.error_code == "a2a.authorization_denied"
+    assert result.error_details["httpStatus"] == 403
+    assert result.error_details["code"] == 403
+    assert result.error_details["retryAfter"] == "30"
+    assert result.error_details["details"][0]["metadata"]["access_token"] == "***"
+    assert "raw-secret" not in result.error
+    assert "nested-secret" not in str(result.error_details)
+
+
+def test_remote_error_without_reason_uses_http_status_fallback():
+    from workflow_engine.client.remote_error import from_payload
+
+    remote = from_payload('{"error":{"code":429,"message":"slow down"}}')
+    assert remote is not None
+    result = failure_to_task_result(remote)
+    assert result.error_code == "a2a.http.429"
+    assert result.error_details == {"httpStatus": 429, "code": 429}
+
+
+def test_http_and_sse_wrappers_retain_structured_remote_error():
+    import httpx
+
+    from a2a.client.errors import A2AClientError
+    from workflow_engine.client.remote_error import find_in_exception
+
+    envelope = '{"error":{"code":403,"message":"forbidden"}}'
+    request = httpx.Request("GET", "https://agent.example/a2a")
+    response = httpx.Response(
+        403, request=request, text=envelope, headers={"Retry-After": "60"},
+    )
+    http_error = httpx.HTTPStatusError("remote failure", request=request, response=response)
+    mapped_http = failure_to_task_result(http_error)
+    assert mapped_http.error_code == "a2a.http.403"
+    assert mapped_http.error_details["retryAfter"] == "60"
+
+    sse_error = A2AClientError(f"SSE stream error event received: {envelope}")
+    mapped_sse = find_in_exception(sse_error)
+    assert mapped_sse is not None
+    assert failure_to_task_result(sse_error).error_code == "a2a.http.403"
+
+
+def test_sse_message_with_error_envelope_cannot_be_normalized_into_empty_event():
+    from workflow_engine.client.remote_error import RemoteA2AError
+    from workflow_engine.client.sse_normalization import apply_sse_normalization
+
+    apply_sse_normalization()
+    with pytest.raises(RemoteA2AError) as raised:
+        ParseDict(
+            {"error": {"code": 429, "message": "rate limited"}},
+            StreamResponse(),
+        )
+    assert raised.value.workflow_code == "a2a.http.429"
+
+
+@pytest.mark.parametrize("bad_input", [
+    {"text": "hello", "data": {"x": 1}},
+    {"other": "hello"},
+    42,
+    ["hello"],
+])
+def test_workflow_rejects_malformed_subtask_business_input(bad_input):
+    from workflow_engine import Workflow
+
+    with pytest.raises(ValueError, match="subtask input"):
+        Workflow.from_dict({
+            "steps": [{"name": "one", "subtasks": [{"agent": "agent", "input": bad_input}]}],
+        })
+
+
+@pytest.mark.asyncio
+async def test_transport_accepts_explicit_credential_key_without_process_environment(monkeypatch):
+    monkeypatch.delenv("A2AT_CRED_KEY", raising=False)
+    key = "ab" * 32
+    sealed = encrypt("client-secret", key_hex=key)
+    config = {"agent": {"bearer": {"password": sealed}}}
+
+    with pytest.raises(RuntimeError, match="A2AT_CRED_KEY"):
+        A2ATransport([_card()], credentials_config=config)
+
+    transport = A2ATransport(
+        [_card()], credentials_config=config, credential_encryption_key=key,
+    )
+    try:
+        assert decrypt_if_needed(sealed, key_hex=key) == "client-secret"
+        assert transport._auth_manager._auth_manager.get_service("agent") is not None
+    finally:
+        await transport.close()
+
+
+@pytest.mark.asyncio
+async def test_empty_transport_stream_fails_with_stable_error_code():
+    from workflow_engine.client.remote_error import EmptyA2AStreamError
+
+    class EmptyClient:
+        async def send_message(self, request):
+            if False:
+                yield request
+
+    transport = A2ATransport([_card()])
+    try:
+        with pytest.raises(EmptyA2AStreamError) as raised:
+            await transport.consume_stream(EmptyClient(), object(), agent_name="agent")
+        result = failure_to_task_result(raised.value)
+        assert result.error_code == "a2a.empty_stream"
+        assert not result.success
+    finally:
+        await transport.close()
+
+
+@pytest.mark.asyncio
+async def test_empty_protocol_event_is_not_counted_as_a_valid_stream_event():
+    from workflow_engine.client.remote_error import EmptyA2AStreamError
+
+    class EmptyEventClient:
+        async def send_message(self, request):
+            del request
+            yield StreamResponse()
+
+    transport = A2ATransport([_card()])
+    try:
+        with pytest.raises(EmptyA2AStreamError, match="empty event"):
+            await transport.consume_stream(EmptyEventClient(), object(), agent_name="agent")
+    finally:
+        await transport.close()
 
 
 # ----------------------------------------------------------------------

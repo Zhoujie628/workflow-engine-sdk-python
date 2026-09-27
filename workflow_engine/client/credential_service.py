@@ -59,10 +59,12 @@ class AgentCredentialService(CredentialService if _A2A_AVAILABLE else object):
     """Obtains tokens via login endpoint, caches with TTL."""
 
     def __init__(self, agent_name: str, scheme_configs: Dict[str, dict],
-                 httpx_client: Optional[httpx.AsyncClient] = None):
+                 httpx_client: Optional[httpx.AsyncClient] = None,
+                 credential_encryption_key: Optional[str] = None):
         self._agent_name = agent_name
         self._schemes = scheme_configs
         self._httpx_client = httpx_client
+        self._credential_encryption_key = credential_encryption_key
         self._tokens: Dict[str, tuple] = {}
         self._lock = None
 
@@ -107,11 +109,13 @@ class AgentCredentialService(CredentialService if _A2A_AVAILABLE else object):
         token_field = scheme_cfg.get("token_field", "accessSession")
         request_fields = scheme_cfg.get("request_fields")
         if request_fields and isinstance(request_fields, dict):
-            body = {k: decrypt_if_needed(v) if isinstance(v, str) else v
+            body = {k: decrypt_if_needed(v, key_hex=self._credential_encryption_key) if isinstance(v, str) else v
                     for k, v in request_fields.items()}
         else:
             username = scheme_cfg.get("username")
-            password = decrypt_if_needed(scheme_cfg.get("password"))
+            password = decrypt_if_needed(
+                scheme_cfg.get("password"), key_hex=self._credential_encryption_key,
+            )
             if not username or not password:
                 raise ValueError(
                     f"Authentication username and password are required for {self._agent_name}"
@@ -178,10 +182,13 @@ class AgentCredentialService(CredentialService if _A2A_AVAILABLE else object):
 class AgentAuthManager:
     """Loads agent credentials from config, creates per-agent CredentialService."""
 
-    def __init__(self, config: Optional[Dict[str, dict]] = None, config_path: Optional[str] = None):
+    def __init__(self, config: Optional[Dict[str, dict]] = None,
+                 config_path: Optional[str] = None,
+                 credential_encryption_key: Optional[str] = None):
         self._config: Dict[str, dict] = {}
         self._services: Dict[str, AgentCredentialService] = {}
         self._httpx_client: Optional[httpx.AsyncClient] = None
+        self._credential_encryption_key = credential_encryption_key
         if config is not None:
             self._config = self._resolve_config(copy.deepcopy(config))
         elif config_path:
@@ -248,13 +255,12 @@ class AgentAuthManager:
             else:
                 target[key] = copy.deepcopy(value)
 
-    @classmethod
-    def _validate_encrypted_credentials(cls, value) -> None:
+    def _validate_encrypted_credentials(self, value) -> None:
         if isinstance(value, dict):
             for nested in value.values():
-                cls._validate_encrypted_credentials(nested)
+                self._validate_encrypted_credentials(nested)
         elif isinstance(value, str) and value.startswith("enc:"):
-            decrypt_if_needed(value)
+            decrypt_if_needed(value, key_hex=self._credential_encryption_key)
 
     def get_service(self, agent_name: str) -> Optional[AgentCredentialService]:
         if agent_name in self._services:
@@ -263,7 +269,8 @@ class AgentAuthManager:
         if not agent_creds:
             return None
         service = AgentCredentialService(
-            agent_name, agent_creds, httpx_client=self._httpx_client
+            agent_name, agent_creds, httpx_client=self._httpx_client,
+            credential_encryption_key=self._credential_encryption_key,
         )
         self._services[agent_name] = service
         logger.info(f"[Auth] Created credential service for agent: {agent_name}")

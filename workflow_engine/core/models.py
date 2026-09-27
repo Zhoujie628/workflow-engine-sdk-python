@@ -124,6 +124,16 @@ class MessageContent:
     def from_parts(cls, parts: Sequence[Any]) -> "MessageContent":
         return cls(parts=tuple(parts))
 
+    def with_extension(self, uri: str) -> "MessageContent":
+        """Return an immutable copy with one additional activated extension."""
+        if not isinstance(uri, str) or not uri.strip():
+            raise ValueError("Extension URI must not be blank")
+        return MessageContent(
+            parts=self.parts,
+            metadata=self.metadata,
+            extensions=self.extensions | {uri},
+        )
+
 
 @dataclass(frozen=True)
 class ReceivedArtifact:
@@ -264,12 +274,16 @@ class Workflow:
                 raw_input = raw_task.get("input")
                 business_input = None
                 if isinstance(raw_input, Mapping):
-                    if raw_input.get("text") is not None:
+                    if len(raw_input) != 1 or ("text" in raw_input) == ("data" in raw_input):
+                        raise ValueError("subtask input must contain exactly one of text or data")
+                    if "text" in raw_input:
                         business_input = BusinessInput.from_text(raw_input["text"])
-                    elif "data" in raw_input:
+                    else:
                         business_input = BusinessInput.from_data(raw_input["data"])
                 elif isinstance(raw_input, str):
                     business_input = BusinessInput.from_text(raw_input)
+                elif raw_input is not None:
+                    raise ValueError("subtask input must be an object with text or data")
                 subtasks.append(Task(
                     agent=raw_task.get("agent", ""),
                     skill=raw_task.get("skill", ""),

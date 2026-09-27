@@ -97,7 +97,7 @@ subscription = ExtensionSender(notification_transport).open_notification(
 )
 try:
     ack = await subscription.acknowledgement  # 仅表示订阅已接受，流继续保持
-    # 收到目标业务结果后由 on_notification 显式关闭，或在停机时关闭。
+    # 单条通知结果不结束订阅；保持监听，直到明确取消、停机或流异常结束。
     await subscription.completion
 finally:
     subscription.close()

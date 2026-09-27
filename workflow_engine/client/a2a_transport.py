@@ -81,6 +81,8 @@ class A2ATransport:
         send_timeout_seconds: int = 600,
         task_poll_interval_seconds: float = 20.0,
         notification_ack_timeout_seconds: float = 300.0,
+        *,
+        credential_encryption_key: Optional[str] = None,
     ):
         if send_timeout_seconds <= 0:
             raise ValueError("send_timeout_seconds must be positive")
@@ -108,11 +110,18 @@ class A2ATransport:
         # no-op unless a listener is bound for the call, so it is safe to install
         # on a caller-provided client as well.
         install_activity_hook(self._httpx_client)
-        self._auth_manager = AuthManager(normalized_cards, credentials_config)
+        self._auth_manager = AuthManager(
+            normalized_cards, credentials_config,
+            credential_encryption_key=credential_encryption_key,
+        )
         self._auth_manager.set_httpx_client(self._httpx_client)
         self._context_id = str(uuid.uuid4())
         self._auth_provider = auth_provider
         self._preferred_protocol = preferred_protocol
+        self._explicit_tls_options = bool(
+            ca_certs_path or client_cert_path or client_key_path
+            or client_key_password or crl_path
+        )
         logger.info(
             f"[Transport] Initialized with {len(self._card_map)} agent(s), "
             f"ssl_verify={ssl_verify}, "
@@ -245,10 +254,14 @@ class A2ATransport:
 
     @staticmethod
     def validate_content_extensions(agent_card, content: MessageContent) -> None:
-        """Enforce AgentCard extensions marked as required for this request."""
+        """Reject missing required and undeclared activated extensions."""
         declared = getattr(
             getattr(agent_card, "capabilities", None), "extensions", ()
         ) or ()
+        declared_uris = {extension.uri for extension in declared}
+        undeclared = set(content.extensions) - declared_uris
+        if undeclared:
+            raise ValueError(f"Extension not declared by AgentCard: {sorted(undeclared)[0]}")
         missing = [
             extension.uri for extension in declared
             if getattr(extension, "required", False)
@@ -287,14 +300,28 @@ class A2ATransport:
             if matched:
                 interfaces = matched
             else:
-                logger.warning(
-                    f"[Transport] Preferred protocol {self._preferred_protocol} "
-                    f"not in supportedInterfaces for {agent_card.name}, using first available"
+                raise ValueError(
+                    f"Preferred protocol {self._preferred_protocol} is not declared "
+                    f"by AgentCard for {agent_card.name}"
+                )
+        elif self._preferred_protocol and not interfaces:
+            if self._preferred_protocol.upper() not in {"HTTP+JSON", "JSONRPC"}:
+                raise ValueError(
+                    f"Preferred protocol {self._preferred_protocol} is not declared "
+                    f"by AgentCard for {agent_card.name}"
                 )
         protocol_bindings = (
             [iface.protocol_binding for iface in interfaces]
             or ["HTTP+JSON", "JSONRPC"]
         )
+        if self._explicit_tls_options and protocol_bindings[0].upper() not in {
+            "HTTP+JSON", "JSONRPC",
+        }:
+            raise ValueError(
+                f"TLS/mTLS/CRL options cannot be applied to {protocol_bindings[0]} "
+                f"for {agent_card.name}; select an HTTP protocol or configure "
+                "that protocol's TLS transport explicitly"
+            )
         streaming = (
             agent_card.capabilities.streaming if agent_card.capabilities else False
         )
@@ -368,6 +395,7 @@ class A2ATransport:
         standalone_messages: Dict[str, ReceivedMessage] = {}
         task_artifacts: Dict[str, ReceivedArtifact] = {}
         task_status_message = None
+        received_any_event = False
 
         async for response in client.send_message(send_req):
             self.log_response_event(agent_name, response)
@@ -375,6 +403,11 @@ class A2ATransport:
             has_message = response.HasField("message")
             has_status = response.HasField("status_update")
             has_artifact = response.HasField("artifact_update")
+            if not (has_task or has_message or has_status or has_artifact):
+                from workflow_engine.client.remote_error import EmptyA2AStreamError
+
+                raise EmptyA2AStreamError("A2A response stream contained an empty event")
+            received_any_event = True
 
             if has_task:
                 task = response.task
@@ -500,6 +533,11 @@ class A2ATransport:
                         "last_chunk": getattr(update, "last_chunk", False),
                         "metadata": dict(artifact.metadata),
                     })
+
+        if not received_any_event:
+            from workflow_engine.client.remote_error import EmptyA2AStreamError
+
+            raise EmptyA2AStreamError("A2A response stream ended without an event")
 
         received = list(standalone_messages.values())
         if last_task_result is not None or task_artifacts or task_status_message is not None:

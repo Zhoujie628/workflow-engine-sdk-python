@@ -8,6 +8,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- Protocol diagnostics now redact credential-shaped values in request and response
+  bodies as well as headers. Workflow failure and callback logs also redact
+  credential-shaped exception text; registry search no longer logs raw intent.
+- Standard A2A HTTP and SSE error envelopes retain their status, reason,
+  retry hint and safe details. An empty response stream fails immediately with
+  `a2a.empty_stream` instead of returning an unattributed unsuccessful result.
+- A malformed subtask `input`, an activated extension missing from AgentCard,
+  or an unavailable explicitly preferred protocol now fails before dispatch.
+  Explicit TLS/mTLS/CRL options are rejected for unsupported non-HTTP transports
+  instead of being silently ignored.
+- Hosts may inject `credential_encryption_key` into `A2ATransport` rather than
+  depending on a process-wide `A2AT_CRED_KEY`; the environment remains the
+  compatibility fallback.
+- `MessageContent.with_extension(uri)` offers an immutable, Java-aligned way
+  to activate one extension for a single request.
+- Registry and PSOP HTTP helpers accept separate connect/read timeout settings
+  instead of hard-coding both to 30 seconds.
 - A **notification stream that died was never released**, and a **healthy one could be
   reported as dead**. Liveness was judged from decoded business events only, but an SSE
   comment heartbeat never reaches the protocol layer, so a subscription receiving only
@@ -68,6 +85,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   environment; keys must now be valid environment-variable names.
 
 ### Changed
+- Remote A2A `error_details` now uses Java-compatible `httpStatus`, `code`,
+  `status`, `reason`, `domain`, `details` and `retryAfter` fields. Callers using
+  the former `http_status` or top-level SDK metadata fields must migrate.
 - `NotificationHeartbeat.last_event_at` now reports the last **transport activity**,
   including an SSE comment heartbeat, and `event_count` counts only decoded A2A business
   events. The last business event is available through the new

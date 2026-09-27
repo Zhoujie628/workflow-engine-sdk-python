@@ -81,7 +81,8 @@ authorization = await sender.send_authorization(agent_name, authorization_conten
 
 subscription = sender.open_notification(agent_name, notification_content, on_notification)
 ack = await subscription.acknowledgement
-subscription.close()
+# Keep receiving results; one notification does not end the subscription.
+# The host may call subscription.close() on explicit cancellation or shutdown.
 await subscription.completion
 ```
 

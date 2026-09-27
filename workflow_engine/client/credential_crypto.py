@@ -18,8 +18,9 @@
 """AES-GCM credential encryption/decryption utility.
 
 Supports encrypted values in credential config files using the ``enc:``
-prefix. The encryption key is read from the ``A2AT_CRED_KEY`` environment
-variable (32-byte hex string). Mirrors the Java SDK's ``CredentialCrypto``.
+prefix. The encryption key is host-injected when provided, otherwise read
+from ``A2AT_CRED_KEY`` (32-byte hex string). Mirrors the Java SDK's
+``CredentialCrypto``.
 
 Usage in credentials JSON::
 
@@ -46,15 +47,19 @@ _IV_LENGTH = 12  # 96-bit IV for GCM
 _TAG_LENGTH = 16  # 128-bit auth tag
 
 
-def _resolve_key() -> Optional[str]:
-    """Resolve the encryption key from OS environment."""
+def _resolve_key(explicit_key: Optional[str] = None) -> Optional[str]:
+    """Prefer the host-provided key; retain the environment as a fallback."""
+    if explicit_key is not None:
+        return explicit_key
     key = os.environ.get(_ENV_KEY)
     if key:
         return key
     return None
 
 
-def decrypt_if_needed(value: Optional[str], aad: Optional[str] = None) -> Optional[str]:
+def decrypt_if_needed(
+    value: Optional[str], aad: Optional[str] = None, *, key_hex: Optional[str] = None,
+) -> Optional[str]:
     """Decrypt a credential value if it has the ``enc:`` prefix.
 
     Values without the prefix are returned as-is (plaintext fallback).
@@ -62,7 +67,7 @@ def decrypt_if_needed(value: Optional[str], aad: Optional[str] = None) -> Option
     """
     if not value or not value.startswith(_PREFIX):
         return value
-    key_hex = _resolve_key()
+    key_hex = _resolve_key(key_hex)
     if not key_hex or not key_hex.strip():
         raise RuntimeError(
             f"Encrypted credential found but {_ENV_KEY} is not configured"
@@ -90,13 +95,15 @@ def decrypt_if_needed(value: Optional[str], aad: Optional[str] = None) -> Option
         raise RuntimeError("Credential decryption failed") from e
 
 
-def encrypt(plaintext: str, aad: Optional[str] = None) -> str:
-    """Encrypt a plaintext value using AES-GCM with the key from A2AT_CRED_KEY.
+def encrypt(
+    plaintext: str, aad: Optional[str] = None, *, key_hex: Optional[str] = None,
+) -> str:
+    """Encrypt a plaintext value using AES-GCM with an explicit or environment key.
 
     Returns encrypted string in format ``enc:<base64-iv>:<base64-ciphertext>``.
     Raises RuntimeError if the key env var is not set.
     """
-    key_hex = _resolve_key()
+    key_hex = _resolve_key(key_hex)
     if not key_hex or not key_hex.strip():
         raise RuntimeError(f"{_ENV_KEY} environment variable not set")
     key_bytes = _decode_key(key_hex)

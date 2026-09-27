@@ -54,6 +54,17 @@ def _tls_options(
     )
 
 
+def _http_timeout(connect_seconds: float, read_seconds: float):
+    import httpx
+
+    if connect_seconds <= 0 or read_seconds <= 0:
+        raise ValueError("connect and read timeouts must be positive")
+    return httpx.Timeout(
+        connect=connect_seconds, read=read_seconds,
+        write=read_seconds, pool=connect_seconds,
+    )
+
+
 async def load_psop(
     base_url: str,
     psop_id: str,
@@ -64,6 +75,9 @@ async def load_psop(
     client_key_path: Optional[str] = None,
     client_key_password: Optional[str] = None,
     crl_path: Optional[str] = None,
+    *,
+    connect_timeout_seconds: float = 30.0,
+    read_timeout_seconds: float = 30.0,
 ) -> "Workflow":
     """Fetch a PSOP from the orchestration center external API.
 
@@ -81,7 +95,8 @@ async def load_psop(
             ssl_verify, ca_certs_path, client_cert_path, client_key_path,
             client_key_password, crl_path,
         ),
-        timeout=30, follow_redirects=False,
+        timeout=_http_timeout(connect_timeout_seconds, read_timeout_seconds),
+        follow_redirects=False,
     ) as client:
         resp = await client.get(url, headers=headers)
         resp.raise_for_status()
@@ -102,6 +117,9 @@ async def search_psop(
     client_key_path: Optional[str] = None,
     client_key_password: Optional[str] = None,
     crl_path: Optional[str] = None,
+    *,
+    connect_timeout_seconds: float = 30.0,
+    read_timeout_seconds: float = 30.0,
 ) -> List["WorkflowSearchResult"]:
     """Search for matching PSOP workflows from the orchestration center.
 
@@ -117,13 +135,13 @@ async def search_psop(
     headers = {"Authorization": f"Bearer {access_token}"} if access_token else {}
     body = {"intent": intent, "top_n": top_n}
     logger.info(f"[Registry] Searching PSOP at {url} (intent_chars={len(intent)}, top_n={top_n})")
-    logger.trace(f"[Registry] Search intent={intent}")
     async with httpx.AsyncClient(
         verify=_tls_options(
             ssl_verify, ca_certs_path, client_cert_path, client_key_path,
             client_key_password, crl_path,
         ),
-        timeout=30, follow_redirects=False,
+        timeout=_http_timeout(connect_timeout_seconds, read_timeout_seconds),
+        follow_redirects=False,
     ) as client:
         resp = await client.post(url, json=body, headers=headers)
         resp.raise_for_status()
@@ -152,10 +170,14 @@ class RegistryClient:
         client_key_path: Optional[str] = None,
         client_key_password: Optional[str] = None,
         crl_path: Optional[str] = None,
+        *,
+        connect_timeout_seconds: float = 30.0,
+        read_timeout_seconds: float = 30.0,
     ):
         self.url = url.rstrip("/")
         self.ssl_verify = ssl_verify
         self.access_token = access_token
+        self._timeout = _http_timeout(connect_timeout_seconds, read_timeout_seconds)
         # Built once so a missing or invalid TLS file fails at construction
         # rather than halfway through a fetch.
         self._verify = _tls_options(
@@ -172,7 +194,7 @@ class RegistryClient:
         """Fetch all AgentCards. Returns protobuf objects if a2a-sdk available, else dicts."""
         import httpx
         logger.info(f"[Registry] Fetching all agent cards from {self.url}")
-        async with httpx.AsyncClient(verify=self._verify, timeout=30) as client:
+        async with httpx.AsyncClient(verify=self._verify, timeout=self._timeout) as client:
             resp = await client.get(
                 f"{self.url}/rest/v1/registry-center/agent-cards",
                 headers=self._headers(),
@@ -197,7 +219,7 @@ class RegistryClient:
         params = {"name": name}
         if organization:
             params["organization"] = organization
-        async with httpx.AsyncClient(verify=self._verify, timeout=30) as client:
+        async with httpx.AsyncClient(verify=self._verify, timeout=self._timeout) as client:
             resp = await client.get(
                 f"{self.url}/rest/v1/registry-center/agent-cards",
                 params=params,
@@ -233,7 +255,7 @@ class RegistryClient:
         url = f"{self.url}/rest/v1/registry-center/agent-cards"
         payload = {"agentCards": [card_payload]}
         logger.info(f"[Registry] Registering agent card: name={card_payload.get('name', '?')}")
-        async with httpx.AsyncClient(verify=self._verify, timeout=30) as client:
+        async with httpx.AsyncClient(verify=self._verify, timeout=self._timeout) as client:
             resp = await client.post(url, json=payload, headers=self._headers())
             resp.raise_for_status()
             result = resp.json()

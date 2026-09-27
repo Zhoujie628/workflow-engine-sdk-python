@@ -211,8 +211,9 @@ def test_standard_a2a_error_maps_to_stable_business_failure():
     assert not result.success
     assert result.error_code == "a2a.task_not_found"
     assert result.error == "Task unavailable"
-    assert result.error_details["http_status"] == 404
-    assert result.error_details["taskId"] == "task-1"
+    assert result.error_details["httpStatus"] == 404
+    assert result.error_details["code"] == 404
+    assert result.error_details["details"][0]["metadata"]["taskId"] == "task-1"
 
 
 def test_generic_failure_preserves_actionable_message():

@@ -353,6 +353,38 @@ async def test_interrupted_stream_without_a_task_identity_still_propagates():
 
 
 @pytest.mark.asyncio
+async def test_remote_rejection_is_not_mistaken_for_a_recoverable_stream_break():
+    from workflow_engine.client.remote_error import RemoteA2AError
+
+    error = RemoteA2AError(403, 403, "denied", reason="ACCESS_DENIED")
+    transport = _ScriptedTransport(break_on_send=1, stream_error=error)
+
+    with pytest.raises(RemoteA2AError, match="denied"):
+        await WorkflowEngineClient(transport).dispatch(
+            _task_request(), MessageContent.text("task"), _RecordingControlPoint(),
+        )
+
+    assert transport.polls == 0
+    assert transport.cancelled == []
+
+
+@pytest.mark.asyncio
+async def test_empty_stream_does_not_poll_or_cancel_a_known_task():
+    from workflow_engine.client.remote_error import EmptyA2AStreamError
+
+    transport = _ScriptedTransport(
+        break_on_send=1,
+        stream_error=EmptyA2AStreamError("A2A response stream ended without an event"),
+    )
+    with pytest.raises(EmptyA2AStreamError):
+        await WorkflowEngineClient(transport).dispatch(
+            _task_request(), MessageContent.text("task"), _RecordingControlPoint(),
+        )
+    assert transport.polls == 0
+    assert transport.cancelled == []
+
+
+@pytest.mark.asyncio
 async def test_local_negotiation_failure_still_cancels_the_remote_task():
     """The cancellation contract for local interaction failures must survive."""
     class RefusingControlPoint(ControlPoint):

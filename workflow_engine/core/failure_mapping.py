@@ -8,7 +8,10 @@
 from __future__ import annotations
 
 import asyncio
+import json
 
+from workflow_engine.client.remote_error import EmptyA2AStreamError, find_in_exception
+from workflow_engine.client.sensitive_data import redact
 from workflow_engine.core.models import BusinessFailure, TaskResult
 
 
@@ -27,6 +30,18 @@ def failure_to_task_result(error: BaseException) -> TaskResult:
             error_details=current.details,
         )
 
+    if isinstance(current, EmptyA2AStreamError):
+        return TaskResult.failed("a2a.empty_stream", str(current))
+
+    remote = find_in_exception(error)
+    if remote is not None:
+        return TaskResult(
+            success=False,
+            error_code=remote.workflow_code,
+            error=remote.message,
+            error_details=remote.error_details,
+        )
+
     try:
         from a2a.utils.errors import A2AError, A2A_ERROR_MAPPING
 
@@ -39,18 +54,29 @@ def failure_to_task_result(error: BaseException) -> TaskResult:
                 if mapping is not None:
                     break
             reason = mapping.reason if mapping else ""
-            code = f"a2a.{reason.lower()}" if reason else "a2a.remote_error"
-            details = dict(getattr(current, "data", None) or {})
+            http_status = mapping.http_code if mapping else 500
+            code = f"a2a.{reason.lower()}" if reason else f"a2a.http.{http_status}"
+            metadata = dict(getattr(current, "data", None) or {})
+            safe_metadata = json.loads(redact(json.dumps(metadata, ensure_ascii=False, default=str)))
+            detail = {
+                "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+                "domain": "a2a-protocol.org",
+            }
+            if reason:
+                detail["reason"] = reason
+            if safe_metadata:
+                detail["metadata"] = safe_metadata
+            details = {"httpStatus": http_status, "code": http_status}
             if mapping:
                 details.update({
-                    "http_status": mapping.http_code,
                     "status": mapping.grpc_status,
                     "reason": mapping.reason,
                     "domain": "a2a-protocol.org",
                 })
+            details["details"] = [detail]
             return TaskResult(
                 success=False, error_code=code,
-                error=getattr(current, "message", type(current).__name__),
+                error=redact(getattr(current, "message", type(current).__name__)),
                 error_details=details,
             )
     except ImportError:
@@ -62,4 +88,4 @@ def failure_to_task_result(error: BaseException) -> TaskResult:
         code = "workflow.cancelled"
     else:
         code = "workflow.execution_failed"
-    return TaskResult.failed(code, str(current) or type(current).__name__)
+    return TaskResult.failed(code, redact(str(current)) or type(current).__name__)

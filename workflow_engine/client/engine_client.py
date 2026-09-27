@@ -86,7 +86,9 @@ class WorkflowEngineClient:
         try:
             self._event_callback.on_event(event_type, data)
         except Exception as exc:
-            logger.warning(f"Event callback failed for {event_type}: {exc}")
+            from workflow_engine.client.sensitive_data import redact
+
+            logger.warning(f"Event callback failed for {event_type}: {redact(str(exc))}")
 
     def _forward_intermediate_event(self, event_type: str, data: Dict[str, Any]) -> None:
         self._emit(event_type, data)
@@ -151,9 +153,15 @@ class WorkflowEngineClient:
         if deadline <= 0:
             raise ValueError("timeout_seconds must be positive")
         async with asyncio.timeout(deadline):
+            received_any_event = False
             async for response in client.send_message(request):
+                received_any_event = True
                 self._transport.log_response_event(agent_name, response)
                 yield self._transport.parse_stream_event(response)
+            if not received_any_event:
+                from workflow_engine.client.remote_error import EmptyA2AStreamError
+
+                raise EmptyA2AStreamError("A2A response stream ended without an event")
 
     @staticmethod
     def _default_input():
@@ -180,7 +188,10 @@ class WorkflowEngineClient:
             )
             raise
         except Exception as exc:
-            await self._cancel_abandoned_interaction(request.agent_name, interaction)
+            from workflow_engine.client.remote_error import EmptyA2AStreamError, find_in_exception
+
+            if not isinstance(exc, EmptyA2AStreamError) and find_in_exception(exc) is None:
+                await self._cancel_abandoned_interaction(request.agent_name, interaction)
             if interaction["negotiation_started"]:
                 self._emit(EventType.NEGOTIATION_FAILED, {
                     "agent": request.agent_name,
@@ -442,6 +453,13 @@ class WorkflowEngineClient:
                 timeout=max(0.0, deadline - time.monotonic()),
             )
         except Exception as exc:
+            from workflow_engine.client.remote_error import EmptyA2AStreamError, find_in_exception
+
+            # A structured remote rejection is a result, not an interrupted
+            # transport stream. Polling would obscure its reason and may wait
+            # on a task the remote has already rejected.
+            if isinstance(exc, EmptyA2AStreamError) or find_in_exception(exc) is not None:
+                raise
             known_task_id = interaction.get("remote_task_id")
             if not known_task_id or interaction.get("terminal"):
                 raise
