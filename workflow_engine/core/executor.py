@@ -96,7 +96,7 @@ class WorkflowExecutor:
                 if not ready:
                     missing = {
                         self.workflow.steps[index].name: [
-                            name for name in self.context_builder.get_step_predecessors(
+                            name for name in self.context_builder.get_all_predecessors(
                                 self.workflow.steps[index].name
                             )
                             if (pred_index := self.context_builder.find_step_index(name)) in activated
@@ -146,11 +146,17 @@ class WorkflowExecutor:
             if index >= len(self.workflow.steps) or index in executed:
                 continue
             step = self.workflow.steps[index]
-            active_predecessors = [
-                name for name in self.context_builder.get_step_predecessors(step.name)
+            # A direct predecessor can still be inactive while an earlier branch is
+            # running and may activate it later. Waiting on every active ancestor --
+            # not just the direct predecessors -- is what blocks a merge from running
+            # before the branch that feeds it: an ancestor that is already activated
+            # but has not produced output is exactly the "still running" signal, and a
+            # direct predecessor that has not been activated yet is invisible here.
+            active_ancestors = [
+                name for name in self.context_builder.get_all_predecessors(step.name)
                 if (pred_index := self.context_builder.find_step_index(name)) in activated
             ]
-            (ready if all(name in self.step_outputs for name in active_predecessors)
+            (ready if all(name in self.step_outputs for name in active_ancestors)
              else deferred).append(index)
         return ready, deferred
 

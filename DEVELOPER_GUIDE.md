@@ -4,7 +4,7 @@
 
 - Python 3.12 or newer
 - `a2a-sdk>=1.1.2,<2`
-- `a2a-t-sdk>=1.0.9,<2` (the engine uses its core metadata contract; host callbacks use its content APIs)
+- `a2a-t-sdk>=1.1.0,<2` (the engine uses its core metadata contract; host callbacks use its content APIs)
 
 ```bash
 python -m pip install -e ".[dev]"
@@ -243,16 +243,21 @@ from a2a_t.core.standard_templates import (
 )
 
 auth_transport = A2ATransport(agent_cards, auth_provider=provider)
-sender = ExtensionSender(auth_transport)
+notification_transport = A2ATransport(agent_cards, auth_provider=provider)
+auth_sender = ExtensionSender(auth_transport)
+notification_sender = ExtensionSender(notification_transport)
 
 generated_auth = a2at_client.generate_auth_prompt_from_text(
     authorization_text,
     AUTHORIZATION_POLICY_MANAGEMENT_URI,
 )
 auth_content = A2atMessages.from_generated(generated_auth, [Part(text="authorize policy")])
-auth_result = await sender.send_authorization("domain-a", auth_content)
-if not auth_result.is_success:
-    record_independent_failure(auth_result.failure_code, auth_result.failure_message)
+try:
+    auth_result = await auth_sender.send_authorization("domain-a", auth_content)
+    if not auth_result.is_success:
+        record_independent_failure(auth_result.failure_code, auth_result.failure_message)
+finally:
+    await auth_transport.close()  # The one-shot channel is no longer needed.
 ```
 
 Notification uses a long-lived handle:
@@ -260,8 +265,7 @@ Notification uses a long-lived handle:
 ```python
 def on_notification(subscription, received):
     process(received)
-    if is_expected_final_result(received):
-        subscription.close()
+    # A single result does not end the subscription; later notifications may follow.
 
 generated_notification = a2at_client.generate_notification_prompt_from_text(
     subscription_text,
@@ -271,15 +275,18 @@ notification_content = A2atMessages.from_generated(
     generated_notification,
     [Part(text="subscribe to business event")],
 )
-subscription = sender.open_notification("domain-a", notification_content, on_notification)
-ack = await subscription.acknowledgement
-if ack.is_failure:
+subscription = notification_sender.open_notification(
+    "domain-a", notification_content, on_notification,
+)
+try:
+    await subscription.acknowledgement  # A state-bearing ACK; stream remains open.
+    await subscription.completion  # Ends on explicit close, EOF, idle timeout or error.
+finally:
     subscription.close()
-    record_independent_failure(ack.failure_code, ack.failure_message)
-await subscription.completion
+    await notification_transport.close()
 ```
 
-Use a transport instance separate from workflow task traffic. Host orchestration may log an independent-operation failure, but it must not make workflow execution depend on that result unless explicit business policy says so.
+Use three transport instances for workflow tasks, Authorization-T, and Notification-T. Authorization-T is one-shot; release its transport after the result. Notification-T keeps its own transport until the subscription ends. A message or artifact without task state is not an ACK, and a failure state rejects the subscription. Host orchestration may log an independent-operation failure, but it must not make workflow execution depend on that result unless explicit business policy says so.
 
 ## 7. Existing task operations
 
@@ -332,9 +339,15 @@ The provider owns token acquisition. The engine does not read provider-specific 
 
 ## 9. TLS and diagnostics
 
-Default TLS verifies the server with system trust. Optional parameters are `ca_certs_path`, `client_cert_path`, `client_key_path`, `client_key_password`, and `crl_path`. Missing or invalid configured files raise during construction.
+Default TLS verifies the server with system trust. Optional parameters are `ca_certs_path`, `client_cert_path`, `client_key_path`, `client_key_password`, and `crl_path`. Missing or invalid configured files raise during construction. Explicit TLS/mTLS/CRL options are rejected when the selected protocol cannot apply the HTTP client configuration; select an HTTP protocol or configure that transport's TLS independently. An explicitly preferred protocol absent from the AgentCard fails instead of falling back silently.
 
-Set `WORKFLOW_ENGINE_PROTOCOL_LOGGING=true` to log pretty-printed final A2A request/response objects. Sensitive headers stay redacted unless the separate sensitive-header flag is explicitly enabled. Protocol logs are diagnostic representations; transport internals may still prevent observation of exact wire bytes.
+For encrypted agent credentials, pass `credential_encryption_key=<64-hex-character key>` to `A2ATransport` so each host instance can receive its key from a secret manager. `A2AT_CRED_KEY` remains a fallback when no key is injected. Neither key is logged.
+
+Set `WORKFLOW_ENGINE_PROTOCOL_LOGGING=true` to log pretty-printed final A2A request/response objects. Credential-shaped values in bodies are always redacted. Sensitive headers stay redacted unless the separate sensitive-header flag is explicitly enabled. Protocol logs are diagnostic representations; transport internals may still prevent observation of exact wire bytes.
+
+Remote A2A failures use `a2a.<reason>` or `a2a.http.<status>` when no reason is present. `error_details` follows the Java SDK's `httpStatus`, `code`, `status`, `reason`, `domain`, `details`, and `retryAfter` names. A response stream with no protocol event fails as `a2a.empty_stream`.
+
+`RegistryClient`, `load_psop`, and `search_psop` accept `connect_timeout_seconds` and `read_timeout_seconds` (both default to 30 seconds). Both must be positive.
 
 ## 10. Workflow retrieval
 

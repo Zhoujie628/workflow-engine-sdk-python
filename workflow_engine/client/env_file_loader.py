@@ -24,10 +24,14 @@ Mirrors the Java SDK's ``EnvFileLoader``.
 """
 
 import os
+import re
 from pathlib import Path
 from typing import Optional, Union
 
 from loguru import logger
+
+# A POSIX shell identifier, which is also what os.environ can actually hold.
+_ENV_KEY_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 
 
 def load_to_environ(env_file_path: Optional[Union[str, Path]]) -> int:
@@ -55,9 +59,16 @@ def load_to_environ(env_file_path: Optional[Union[str, Path]]) -> int:
         if eq <= 0:
             continue
         key = trimmed[:eq].strip()
+        # Reject anything that is not a valid environment-variable name instead
+        # of writing it into the process environment unchecked: a malformed or
+        # hostile .env must not be able to plant e.g. A2AT_CRED_KEY, which would
+        # then decide how credential ciphertext is decrypted.
+        if not _ENV_KEY_PATTERN.match(key):
+            logger.warning(f"[EnvLoader] Ignoring invalid key name: {key!r}")
+            continue
         value = trimmed[eq + 1:].strip()
-        # Strip surrounding quotes
-        if len(value) >= 2 and value.startswith('"') and value.endswith('"'):
+        # Strip one layer of matching surrounding quotes.
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
             value = value[1:-1]
         if key in os.environ:
             continue

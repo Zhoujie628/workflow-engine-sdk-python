@@ -211,8 +211,9 @@ def test_standard_a2a_error_maps_to_stable_business_failure():
     assert not result.success
     assert result.error_code == "a2a.task_not_found"
     assert result.error == "Task unavailable"
-    assert result.error_details["http_status"] == 404
-    assert result.error_details["taskId"] == "task-1"
+    assert result.error_details["httpStatus"] == 404
+    assert result.error_details["code"] == 404
+    assert result.error_details["details"][0]["metadata"]["taskId"] == "task-1"
 
 
 def test_generic_failure_preserves_actionable_message():
@@ -321,6 +322,9 @@ class _NegotiationTransport:
 
     def create_a2a_client(self, card):
         return object()
+
+    def client_for(self, agent_name):
+        return self.create_a2a_client(self.get_card(agent_name))
 
     def validate_content_extensions(self, card, content):
         return None
@@ -537,7 +541,7 @@ async def test_authorization_waits_for_terminal_result():
         def get_card(self, agent_name):
             return SimpleNamespace(name=agent_name)
 
-        def _get_extensions(self, card):
+        def get_extension_uris(self, card):
             del card
             return {A2ATExtension.AUTHORIZATION_T.uri}
 
@@ -546,6 +550,9 @@ async def test_authorization_waits_for_terminal_result():
 
         def create_a2a_client(self, card):
             return card
+
+        def client_for(self, agent_name):
+            return self.create_a2a_client(self.get_card(agent_name))
 
         def build_send_request(self, content, context_id):
             del content

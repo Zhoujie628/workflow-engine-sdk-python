@@ -1,4 +1,4 @@
-﻿# Copyright (c) 2026 Huawei Technologies Co., Ltd.
+# Copyright (c) 2026 Huawei Technologies Co., Ltd.
 # All Rights Reserved.
 #
 # SPDX-License-Identifier: Apache-2.0
@@ -122,6 +122,7 @@ async def execute_psop(
     auth_provider=None,
     preferred_protocol: Optional[str] = None,
     send_timeout_seconds: int = 600,
+    task_poll_interval_seconds: float = 20.0,
     max_negotiation_exchanges: int = 3,
     on_finish: Optional[Callable[[ExecutionResult, list], Awaitable[None]]] = None,
     on_event: Optional[Callable[[dict], Any]] = None,
@@ -171,6 +172,7 @@ async def execute_psop(
             auth_provider=auth_provider,
             preferred_protocol=preferred_protocol,
             send_timeout_seconds=send_timeout_seconds,
+            task_poll_interval_seconds=task_poll_interval_seconds,
         )
         engine_client = WorkflowEngineClient.owning(
             transport,
@@ -196,8 +198,10 @@ async def execute_psop(
         except asyncio.CancelledError:
             holder["error"] = "Workflow cancelled (client disconnected)"
         except Exception as e:
-            logger.error(f"[execute_psop] Execution failed: {e}", exc_info=True)
-            holder["error"] = str(e)
+            from workflow_engine.client.sensitive_data import redact
+
+            logger.error(f"[execute_psop] Execution failed: {redact(str(e))}")
+            holder["error"] = redact(str(e))
         finally:
             if owns_client:
                 try:
@@ -226,7 +230,9 @@ async def execute_psop(
                 if hasattr(ret, "__await__"):
                     await ret
             except Exception as e:
-                logger.error(f"[execute_psop] on_finish failed: {e}", exc_info=True)
+                from workflow_engine.client.sensitive_data import redact
+
+                logger.error(f"[execute_psop] on_finish failed: {redact(str(e))}")
 
         emitter.emit("close", {})
         emitter.finish()

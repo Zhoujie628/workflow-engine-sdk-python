@@ -1,4 +1,4 @@
-﻿# Copyright (c) 2026 Huawei Technologies Co., Ltd.
+# Copyright (c) 2026 Huawei Technologies Co., Ltd.
 # All Rights Reserved.
 #
 # SPDX-License-Identifier: Apache-2.0
@@ -99,4 +99,4 @@ __all__ = [
     "execute_psop",
 ]
 
-__version__ = "0.0.3"
+__version__ = "0.1.0"

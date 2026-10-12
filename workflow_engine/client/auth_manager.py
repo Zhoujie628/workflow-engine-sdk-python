@@ -1,4 +1,4 @@
-﻿# Copyright (c) 2026 Huawei Technologies Co., Ltd.
+# Copyright (c) 2026 Huawei Technologies Co., Ltd.
 # All Rights Reserved.
 #
 # SPDX-License-Identifier: Apache-2.0
@@ -33,12 +33,14 @@ except ImportError:
 from workflow_engine.client.credential_service import AgentAuthManager, CustomAuthInterceptor
 from workflow_engine.client.extension_interceptor import ExtensionInterceptor
 from workflow_engine.client.auth_provider import AuthProvider
+from workflow_engine.client.protocol_logger import register_sensitive_header
 
 
 class AuthManager:
     """Builds auth/extension interceptors from AgentCard securitySchemes."""
 
-    def __init__(self, agent_cards: List[Any], credentials_config: Optional[str | Dict] = None):
+    def __init__(self, agent_cards: List[Any], credentials_config: Optional[str | Dict] = None,
+                 credential_encryption_key: Optional[str] = None):
         self._interceptors: Dict[str, List[Any]] = {}
         self._auth_manager: Optional[AgentAuthManager] = None
 
@@ -49,13 +51,21 @@ class AuthManager:
 
         if credentials_config is not None:
             if isinstance(credentials_config, str):
-                self._auth_manager = AgentAuthManager(config_path=credentials_config)
+                self._auth_manager = AgentAuthManager(
+                    config_path=credentials_config,
+                    credential_encryption_key=credential_encryption_key,
+                )
             elif isinstance(credentials_config, dict):
-                self._auth_manager = AgentAuthManager(config=credentials_config)
+                self._auth_manager = AgentAuthManager(
+                    config=credentials_config,
+                    credential_encryption_key=credential_encryption_key,
+                )
             else:
                 raise TypeError("credentials_config must be a file path or mapping")
         else:
-            self._auth_manager = AgentAuthManager()
+            self._auth_manager = AgentAuthManager(
+                credential_encryption_key=credential_encryption_key,
+            )
 
         self._build_interceptors(agent_cards)
 
@@ -129,6 +139,8 @@ class AuthProviderInterceptor(ClientCallInterceptor if _A2A_AUTH_AVAILABLE else 
                 raise RuntimeError(
                     f"Authentication header conflict for agent {self._agent_name}: {name}"
                 )
+            # Everything an AuthProvider contributes is authentication material.
+            register_sensitive_header(name)
             args.context.service_parameters[name] = value
         if headers:
             logger.info(f"[AuthProvider] Injected {len(headers)} header(s) for {self._agent_name}")
